@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.status import HTTP_303_SEE_OTHER
 from database import get_db, init_db
 from services import (
     generate_schedule_for_gate_date,
@@ -14,13 +15,20 @@ from services import (
     get_dates_in_season,
     _time_to_minutes,
 )
+from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 app = FastAPI(title="古城门启闭排班系统")
 
 BASE_DIR = Path(__file__).resolve().parent
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+
+def redirect_with_error(url: str, error_msg: str) -> RedirectResponse:
+    params = urlencode({"error": error_msg})
+    return RedirectResponse(url=f"{url}?{params}", status_code=HTTP_303_SEE_OTHER)
 
 
 @app.on_event("startup")
@@ -122,11 +130,16 @@ async def index(request: Request):
 
 
 @app.get("/gates", response_class=HTMLResponse)
-async def gates_page(request: Request):
+async def gates_page(request: Request, error: str = None):
     conn = get_db()
     gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
     conn.close()
-    return templates.TemplateResponse("gates.html", {"request": request, "gates": gates, "active_page": "gates"})
+    return templates.TemplateResponse("gates.html", {
+        "request": request,
+        "gates": gates,
+        "active_page": "gates",
+        "error_msg": error,
+    })
 
 
 @app.post("/gates/add")
@@ -142,7 +155,7 @@ async def add_gate(
         existing = conn.execute("SELECT id FROM gates WHERE gate_code = ?", (gate_code,)).fetchone()
         if existing:
             conn.close()
-            raise HTTPException(status_code=400, detail=f"城门编号 '{gate_code}' 已存在，不能重复")
+            return redirect_with_error("/gates", f"城门编号 '{gate_code}' 已存在，不能重复")
         conn.execute(
             "INSERT INTO gates (gate_code, gate_name, direction, is_main, notes) VALUES (?,?,?,?,?)",
             (gate_code, gate_name, direction, is_main, notes),
@@ -170,7 +183,7 @@ async def edit_gate(
         ).fetchone()
         if existing:
             conn.close()
-            raise HTTPException(status_code=400, detail=f"城门编号 '{gate_code}' 已存在，不能重复")
+            return redirect_with_error("/gates", f"城门编号 '{gate_code}' 已存在，不能重复")
         conn.execute(
             "UPDATE gates SET gate_code = ?, gate_name = ?, direction = ?, is_main = ?, notes = ? WHERE id = ?",
             (gate_code, gate_name, direction, is_main, notes, gate_id),
@@ -195,11 +208,16 @@ async def delete_gate(gate_id: int):
 
 
 @app.get("/seasons", response_class=HTMLResponse)
-async def seasons_page(request: Request):
+async def seasons_page(request: Request, error: str = None):
     conn = get_db()
     seasons = conn.execute("SELECT * FROM seasons ORDER BY start_month").fetchall()
     conn.close()
-    return templates.TemplateResponse("seasons.html", {"request": request, "seasons": seasons, "active_page": "seasons"})
+    return templates.TemplateResponse("seasons.html", {
+        "request": request,
+        "seasons": seasons,
+        "active_page": "seasons",
+        "error_msg": error,
+    })
 
 
 @app.post("/seasons/add")
@@ -213,7 +231,7 @@ async def add_season(
     sunset_time: str = Form(...),
 ):
     if _time_to_minutes(sunrise_time) >= _time_to_minutes(sunset_time):
-        raise HTTPException(status_code=400, detail="日出时间必须早于日落时间")
+        return redirect_with_error("/seasons", "日出时间必须早于日落时间")
     conn = get_db()
     try:
         conn.execute(
@@ -223,7 +241,7 @@ async def add_season(
         conn.commit()
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
+        return redirect_with_error("/seasons", str(e))
     conn.close()
     return RedirectResponse(url="/seasons", status_code=303)
 
@@ -240,7 +258,7 @@ async def edit_season(
     sunset_time: str = Form(...),
 ):
     if _time_to_minutes(sunrise_time) >= _time_to_minutes(sunset_time):
-        raise HTTPException(status_code=400, detail="日出时间必须早于日落时间")
+        return redirect_with_error("/seasons", "日出时间必须早于日落时间")
     conn = get_db()
     try:
         conn.execute(
@@ -253,7 +271,7 @@ async def edit_season(
             recalculate_schedules_for_date_range(season_dates[0], season_dates[-1])
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
+        return redirect_with_error("/seasons", str(e))
     conn.close()
     return RedirectResponse(url="/seasons", status_code=303)
 
@@ -271,14 +289,20 @@ async def delete_season(season_id: int):
 
 
 @app.get("/curfews", response_class=HTMLResponse)
-async def curfews_page(request: Request):
+async def curfews_page(request: Request, error: str = None):
     conn = get_db()
     curfews = conn.execute(
         "SELECT cr.*, s.season_name FROM curfew_rules cr JOIN seasons s ON cr.season_id = s.id ORDER BY s.start_month"
     ).fetchall()
     seasons = conn.execute("SELECT * FROM seasons ORDER BY start_month").fetchall()
     conn.close()
-    return templates.TemplateResponse("curfews.html", {"request": request, "curfews": curfews, "seasons": seasons, "active_page": "curfews"})
+    return templates.TemplateResponse("curfews.html", {
+        "request": request,
+        "curfews": curfews,
+        "seasons": seasons,
+        "active_page": "curfews",
+        "error_msg": error,
+    })
 
 
 @app.post("/curfews/add")
@@ -290,7 +314,7 @@ async def add_curfew(
 ):
     conflicts = check_curfew_conflict_with_season(curfew_start, curfew_end, season_id)
     if conflicts:
-        raise HTTPException(status_code=400, detail="；".join(conflicts))
+        return redirect_with_error("/curfews", "；".join(conflicts))
 
     conn = get_db()
     try:
@@ -304,7 +328,7 @@ async def add_curfew(
             recalculate_schedules_for_date_range(season_dates[0], season_dates[-1])
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
+        return redirect_with_error("/curfews", str(e))
     conn.close()
     return RedirectResponse(url="/curfews", status_code=303)
 
@@ -319,7 +343,7 @@ async def edit_curfew(
 ):
     conflicts = check_curfew_conflict_with_season(curfew_start, curfew_end, season_id)
     if conflicts:
-        raise HTTPException(status_code=400, detail="；".join(conflicts))
+        return redirect_with_error("/curfews", "；".join(conflicts))
 
     conn = get_db()
     try:
@@ -333,7 +357,7 @@ async def edit_curfew(
             recalculate_schedules_for_date_range(season_dates[0], season_dates[-1])
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
+        return redirect_with_error("/curfews", str(e))
     conn.close()
     return RedirectResponse(url="/curfews", status_code=303)
 
@@ -354,11 +378,16 @@ async def delete_curfew(curfew_id: int):
 
 
 @app.get("/festivals", response_class=HTMLResponse)
-async def festivals_page(request: Request):
+async def festivals_page(request: Request, error: str = None):
     conn = get_db()
     festivals = conn.execute("SELECT * FROM festivals ORDER BY festival_date").fetchall()
     conn.close()
-    return templates.TemplateResponse("festivals.html", {"request": request, "festivals": festivals, "active_page": "festivals"})
+    return templates.TemplateResponse("festivals.html", {
+        "request": request,
+        "festivals": festivals,
+        "active_page": "festivals",
+        "error_msg": error,
+    })
 
 
 @app.post("/festivals/add")
@@ -370,14 +399,22 @@ async def add_festival(
 ):
     conn = get_db()
     try:
+        existing = conn.execute(
+            "SELECT id FROM festivals WHERE festival_date = ?",
+            (festival_date,),
+        ).fetchone()
+        if existing:
+            conn.close()
+            return redirect_with_error("/festivals", f"日期 {festival_date} 已存在节庆活动，同一天只能有一个节庆")
         conn.execute(
             "INSERT INTO festivals (festival_name, festival_date, delay_minutes, notes) VALUES (?,?,?,?)",
             (festival_name, festival_date, delay_minutes, notes),
         )
         conn.commit()
+        recalculate_schedules_for_date_range(festival_date)
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
+        return redirect_with_error("/festivals", str(e))
     conn.close()
     return RedirectResponse(url="/festivals", status_code=303)
 
@@ -392,6 +429,13 @@ async def edit_festival(
 ):
     conn = get_db()
     try:
+        existing = conn.execute(
+            "SELECT id FROM festivals WHERE festival_date = ? AND id != ?",
+            (festival_date, festival_id),
+        ).fetchone()
+        if existing:
+            conn.close()
+            return redirect_with_error("/festivals", f"日期 {festival_date} 已存在节庆活动，同一天只能有一个节庆")
         conn.execute(
             "UPDATE festivals SET festival_name = ?, festival_date = ?, delay_minutes = ?, notes = ? WHERE id = ?",
             (festival_name, festival_date, delay_minutes, notes, festival_id),
@@ -400,7 +444,7 @@ async def edit_festival(
         recalculate_schedules_for_date_range(festival_date)
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
+        return redirect_with_error("/festivals", str(e))
     conn.close()
     return RedirectResponse(url="/festivals", status_code=303)
 
@@ -419,14 +463,20 @@ async def delete_festival(festival_id: int):
 
 
 @app.get("/alerts", response_class=HTMLResponse)
-async def alerts_page(request: Request):
+async def alerts_page(request: Request, error: str = None):
     conn = get_db()
     levels = conn.execute("SELECT * FROM alert_levels ORDER BY level_value").fetchall()
     daily_alerts = conn.execute(
         "SELECT da.*, al.level_name, al.level_value FROM daily_alerts da JOIN alert_levels al ON da.alert_level_id = al.id ORDER BY da.alert_date DESC"
     ).fetchall()
     conn.close()
-    return templates.TemplateResponse("alerts.html", {"request": request, "levels": levels, "daily_alerts": daily_alerts, "active_page": "alerts"})
+    return templates.TemplateResponse("alerts.html", {
+        "request": request,
+        "levels": levels,
+        "daily_alerts": daily_alerts,
+        "active_page": "alerts",
+        "error_msg": error,
+    })
 
 
 @app.post("/alerts/level/add")
@@ -439,14 +489,25 @@ async def add_alert_level(
 ):
     conn = get_db()
     try:
+        existing = conn.execute(
+            "SELECT id FROM alert_levels WHERE level_name = ? OR level_value = ?",
+            (level_name, level_value),
+        ).fetchone()
+        if existing:
+            conn.close()
+            return redirect_with_error("/alerts", "警戒等级名称或数值已存在")
         conn.execute(
             "INSERT INTO alert_levels (level_name, level_value, close_advance_minutes, open_delay_minutes, description) VALUES (?,?,?,?,?)",
             (level_name, level_value, close_advance_minutes, open_delay_minutes, description),
         )
         conn.commit()
+        recalculate_schedules_for_date_range(
+            (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"),
+            (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d"),
+        )
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=f"警戒等级名称或数值重复: {e}")
+        return redirect_with_error("/alerts", f"警戒等级名称或数值重复: {e}")
     conn.close()
     return RedirectResponse(url="/alerts", status_code=303)
 
@@ -468,7 +529,7 @@ async def edit_alert_level(
         ).fetchone()
         if existing:
             conn.close()
-            raise HTTPException(status_code=400, detail="警戒等级名称或数值已存在")
+            return redirect_with_error("/alerts", "警戒等级名称或数值已存在")
         conn.execute(
             "UPDATE alert_levels SET level_name = ?, level_value = ?, close_advance_minutes = ?, open_delay_minutes = ?, description = ? WHERE id = ?",
             (level_name, level_value, close_advance_minutes, open_delay_minutes, description, level_id),
@@ -480,7 +541,7 @@ async def edit_alert_level(
         )
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=f"警戒等级名称或数值重复: {e}")
+        return redirect_with_error("/alerts", f"警戒等级名称或数值重复: {e}")
     conn.close()
     return RedirectResponse(url="/alerts", status_code=303)
 
@@ -520,7 +581,7 @@ async def add_daily_alert(
         recalculate_schedules_for_date_range(alert_date)
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=400, detail=str(e))
+        return redirect_with_error("/alerts", str(e))
     conn.close()
     return RedirectResponse(url="/alerts", status_code=303)
 
@@ -542,9 +603,7 @@ async def delete_daily_alert(daily_id: int):
 
 
 @app.get("/schedules", response_class=HTMLResponse)
-async def schedules_page(request: Request, start_date: str = None):
-    from datetime import datetime, timedelta
-
+async def schedules_page(request: Request, start_date: str = None, error: str = None):
     if not start_date:
         today = datetime.now()
         start_of_week = today - timedelta(days=today.weekday())
@@ -559,6 +618,7 @@ async def schedules_page(request: Request, start_date: str = None):
         "start_date": start_date,
         "gates": gates,
         "active_page": "schedules",
+        "error_msg": error,
     })
 
 

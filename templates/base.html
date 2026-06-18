@@ -23,6 +23,13 @@
     </nav>
 
     <div class="container">
+        {% if error_msg %}
+        <div class="error-banner" id="errorBanner">
+            <span class="error-icon">⚠</span>
+            <span class="error-text">{{ error_msg }}</span>
+            <button class="error-close" onclick="document.getElementById('errorBanner').style.display='none'">&times;</button>
+        </div>
+        {% endif %}
         {% block content %}{% endblock %}
     </div>
 

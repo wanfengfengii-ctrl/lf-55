@@ -54,7 +54,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS festivals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             festival_name TEXT NOT NULL,
-            festival_date TEXT NOT NULL,
+            festival_date TEXT NOT NULL UNIQUE,
             delay_minutes INTEGER NOT NULL DEFAULT 30,
             notes TEXT DEFAULT ''
         )
