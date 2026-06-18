@@ -185,21 +185,19 @@ function loadSampleHistory() {
 }
 
 function loadHistoryTable() {
-    const endDate = new Date().toISOString().slice(0, 10);
-    const startDate = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-    fetch(`/api/traffic/history?start_date=${startDate}&end_date=${endDate}`)
+    fetch('/api/traffic/history')
         .then(r => r.json())
         .then(data => {
             const container = document.getElementById('historyTableContainer');
             if (!data.length) { container.innerHTML = '<p style="color:var(--text-secondary);">暂无历史数据</p>'; return; }
             let html = '<table><thead><tr><th>城门</th><th>日期</th><th>时段</th><th>通行量</th><th>事件因子</th><th>操作</th></tr></thead><tbody>';
-            data.slice(0, 50).forEach(r => {
+            data.slice(0, 200).forEach(r => {
                 const periodLabel = r.time_period === 'morning_peak' ? '早高峰' : '晚高峰';
                 html += `<tr><td>${r.gate_name}</td><td>${r.record_date}</td><td>${periodLabel}</td><td>${r.volume}</td><td>${r.event_factor}</td>
                     <td><button class="btn btn-danger btn-sm" onclick="deleteHistoryRecord(${r.id})">删除</button></td></tr>`;
             });
             html += '</tbody></table>';
-            if (data.length > 50) html += `<p style="color:var(--text-secondary);margin-top:0.5rem;">仅显示最近50条（共${data.length}条）</p>`;
+            if (data.length > 200) html += `<p style="color:var(--text-secondary);margin-top:0.5rem;">仅显示最近200条（共${data.length}条）</p>`;
             container.innerHTML = html;
         })
         .catch(() => {});
@@ -216,14 +214,18 @@ function runPrediction() {
     const startDate = document.getElementById('predictStartDate').value;
     if (!startDate) { showToast('请选择起始日期', 'error'); return; }
     fetch('/api/traffic/predict', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ start_date: startDate }) })
-        .then(r => r.json())
+        .then(r => {
+            if (!r.ok) throw new Error('请求失败');
+            return r.json();
+        })
         .then(data => {
+            if (data.error) { showToast(data.error, 'error'); return; }
             showToast('预测已生成', 'success');
             loadPredictions(startDate);
             loadOverloadWarnings(startDate);
             loadDispatchSuggestions();
         })
-        .catch(() => showToast('预测失败', 'error'));
+        .catch(e => showToast('预测失败: ' + e.message, 'error'));
 }
 
 function loadPredictions(startDate) {

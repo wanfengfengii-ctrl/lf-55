@@ -1088,39 +1088,61 @@ def execute_dispatch_suggestion(suggestion_id: int) -> dict:
     suggestion_type = row["suggestion_type"]
     detail = row["detail"]
 
-    if suggestion_type == "stagger_open":
-        schedule_row = conn.execute(
-            """SELECT id, open_time FROM schedules
-               WHERE gate_id = ? AND schedule_date = ? AND scheme_type = 'final'""",
-            (gate_id, suggest_date),
-        ).fetchone()
-        if schedule_row:
-            new_open = _sub_minutes(schedule_row["open_time"], 30)
-            conn.execute(
-                "UPDATE schedules SET open_time = ? WHERE id = ?",
-                (new_open, schedule_row["id"]),
-            )
+    order_name = f"流量调度-{suggestion_type}-{suggest_date}-gate{gate_id}"
+    existing = conn.execute(
+        "SELECT id FROM temp_control_orders WHERE order_name = ?", (order_name,),
+    ).fetchone()
 
-    elif suggestion_type == "delay_close":
-        schedule_row = conn.execute(
-            """SELECT id, close_time FROM schedules
-               WHERE gate_id = ? AND schedule_date = ? AND scheme_type = 'final'""",
-            (gate_id, suggest_date),
-        ).fetchone()
-        if schedule_row:
-            new_close = _add_minutes(schedule_row["close_time"], 30)
-            conn.execute(
-                "UPDATE schedules SET close_time = ? WHERE id = ?",
-                (new_close, schedule_row["id"]),
-            )
+    if not existing:
+        c = conn.cursor()
+        if suggestion_type == "stagger_open":
+            schedule_row = conn.execute(
+                """SELECT open_time, close_time FROM schedules
+                   WHERE gate_id = ? AND schedule_date = ? AND scheme_type = 'final'""",
+                (gate_id, suggest_date),
+            ).fetchone()
+            if schedule_row:
+                new_open = _sub_minutes(schedule_row["open_time"], 30)
+                c.execute(
+                    """INSERT INTO temp_control_orders
+                       (order_name, start_date, end_date, time_start, time_end,
+                        action_type, forced_open_time, forced_close_time, priority, override_reason, is_active)
+                       VALUES (?, ?, ?, '00:00', '23:59', 'restrict_hours', ?, ?, 15, ?, 1)""",
+                    (order_name, suggest_date, suggest_date,
+                     new_open, schedule_row["close_time"],
+                     f"流量预测调度·分时开门：{detail}"),
+                )
+                order_id = c.lastrowid
+                conn.execute(
+                    "INSERT OR IGNORE INTO temp_control_gates (order_id, gate_id) VALUES (?, ?)",
+                    (order_id, gate_id),
+                )
 
-    elif suggestion_type in ("temp_divert", "gate_switch"):
-        order_name = f"流量调度-{row['suggestion_type']}-{suggest_date}"
-        existing = conn.execute(
-            "SELECT id FROM temp_control_orders WHERE order_name = ?", (order_name,),
-        ).fetchone()
-        if not existing:
-            conn.execute(
+        elif suggestion_type == "delay_close":
+            schedule_row = conn.execute(
+                """SELECT open_time, close_time FROM schedules
+                   WHERE gate_id = ? AND schedule_date = ? AND scheme_type = 'final'""",
+                (gate_id, suggest_date),
+            ).fetchone()
+            if schedule_row:
+                new_close = _add_minutes(schedule_row["close_time"], 30)
+                c.execute(
+                    """INSERT INTO temp_control_orders
+                       (order_name, start_date, end_date, time_start, time_end,
+                        action_type, forced_open_time, forced_close_time, priority, override_reason, is_active)
+                       VALUES (?, ?, ?, '00:00', '23:59', 'restrict_hours', ?, ?, 15, ?, 1)""",
+                    (order_name, suggest_date, suggest_date,
+                     schedule_row["open_time"], new_close,
+                     f"流量预测调度·延后关门：{detail}"),
+                )
+                order_id = c.lastrowid
+                conn.execute(
+                    "INSERT OR IGNORE INTO temp_control_gates (order_id, gate_id) VALUES (?, ?)",
+                    (order_id, gate_id),
+                )
+
+        elif suggestion_type in ("temp_divert", "gate_switch"):
+            c.execute(
                 """INSERT INTO temp_control_orders
                    (order_name, start_date, end_date, time_start, time_end,
                     action_type, forced_open_time, forced_close_time, priority, override_reason, is_active)
@@ -1129,7 +1151,7 @@ def execute_dispatch_suggestion(suggestion_id: int) -> dict:
                  "05:30", "21:00" if suggestion_type == "temp_divert" else "22:00",
                  f"流量预测调度：{detail}"),
             )
-            order_id = conn.last_insert_rowid
+            order_id = c.lastrowid
             conn.execute(
                 "INSERT OR IGNORE INTO temp_control_gates (order_id, gate_id) VALUES (?, ?)",
                 (order_id, gate_id),
