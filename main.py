@@ -35,6 +35,29 @@ from services import (
     dismiss_dispatch_suggestion,
     get_dispatch_comparison,
     get_overload_warnings,
+    init_resource_pools,
+    get_resource_pools,
+    update_resource_pool,
+    get_resource_config,
+    get_all_resource_configs_for_date,
+    set_resource_config,
+    delete_resource_config,
+    calculate_resource_requirements,
+    evaluate_defense_resources,
+    detect_resource_gaps,
+    generate_garrison_shifts,
+    get_garrison_shifts,
+    suggest_gate_downgrade,
+    get_gate_downgrade_suggestions,
+    generate_cross_gate_allocation,
+    get_cross_gate_allocations,
+    update_allocation_status,
+    update_gap_status,
+    update_downgrade_status,
+    get_defense_weekly_trend,
+    get_allocation_comparison,
+    get_resource_gaps,
+    full_defense_evaluation,
 )
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -928,3 +951,182 @@ async def api_delete_traffic_history(record_id: int):
     conn.commit()
     conn.close()
     return JSONResponse(content={"success": True})
+
+
+@app.get("/defense-resources", response_class=HTMLResponse)
+async def defense_resources_page(request: Request, start_date: str = None, error: str = None):
+    if not start_date:
+        today = datetime.now()
+        start_of_week = today - timedelta(days=today.weekday())
+        start_date = start_of_week.strftime("%Y-%m-%d")
+
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    gates = [dict(g) for g in gates]
+    pools = get_resource_pools()
+    if not pools:
+        init_resource_pools()
+        pools = get_resource_pools()
+    conn.close()
+
+    return templates.TemplateResponse("defense_resources.html", {
+        "request": request,
+        "start_date": start_date,
+        "gates": gates,
+        "pools": pools,
+        "active_page": "defense_resources",
+        "error_msg": error,
+    })
+
+
+@app.post("/defense-resources/config")
+async def add_defense_config(
+    gate_id: int = Form(...),
+    config_date: str = Form(...),
+    time_period: str = Form(...),
+    guard_count: int = Form(0),
+    patrol_shifts: int = Form(0),
+    patrol_interval: int = Form(60),
+    light_supplies: int = Form(0),
+    repair_occupancy: int = Form(0),
+    reserve_team: int = Form(0),
+    notes: str = Form(""),
+):
+    result = set_resource_config(
+        gate_id, config_date, time_period,
+        guard_count, patrol_shifts, patrol_interval,
+        light_supplies, repair_occupancy, reserve_team, notes
+    )
+    if not result.get("success"):
+        return redirect_with_error("/defense-resources", result.get("error", "保存配置失败"))
+    return RedirectResponse(url=f"/defense-resources?start_date={config_date}", status_code=303)
+
+
+@app.post("/defense-resources/config/delete/{config_id}")
+async def delete_defense_config(config_id: int):
+    delete_resource_config(config_id)
+    return RedirectResponse(url="/defense-resources", status_code=303)
+
+
+@app.post("/defense-resources/pool/update")
+async def update_defense_pool(
+    resource_type: str = Form(...),
+    total_quantity: int = Form(...),
+):
+    result = update_resource_pool(resource_type, total_quantity)
+    if not result.get("success"):
+        return redirect_with_error("/defense-resources", result.get("error", "更新资源池失败"))
+    return RedirectResponse(url="/defense-resources", status_code=303)
+
+
+@app.get("/api/defense/pools")
+async def api_get_defense_pools():
+    pools = get_resource_pools()
+    return JSONResponse(content=pools)
+
+
+@app.get("/api/defense/configs")
+async def api_get_defense_configs(date_str: str):
+    configs = get_all_resource_configs_for_date(date_str)
+    return JSONResponse(content=configs)
+
+
+@app.get("/api/defense/requirements")
+async def api_get_defense_requirements(gate_id: int, date_str: str, time_period: str):
+    reqs = calculate_resource_requirements(gate_id, date_str, time_period)
+    return JSONResponse(content=reqs)
+
+
+@app.get("/api/defense/evaluate")
+async def api_evaluate_defense(gate_id: int, date_str: str, time_period: str):
+    result = evaluate_defense_resources(gate_id, date_str, time_period)
+    if "error" in result:
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/defense/gaps")
+async def api_get_defense_gaps(gate_id: int = None, date_str: str = None, status: str = None):
+    gaps = get_resource_gaps(gate_id, date_str, status)
+    return JSONResponse(content=gaps)
+
+
+@app.post("/api/defense/gaps/{gap_id}/status")
+async def api_update_gap_status(gap_id: int, request: Request):
+    body = await request.json()
+    status = body.get("status", "open")
+    result = update_gap_status(gap_id, status)
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/defense/shifts")
+async def api_get_defense_shifts(gate_id: int = None, date_str: str = None):
+    shifts = get_garrison_shifts(gate_id, date_str)
+    return JSONResponse(content=shifts)
+
+
+@app.get("/api/defense/downgrades")
+async def api_get_downgrade_suggestions(gate_id: int = None, date_str: str = None, status: str = None):
+    suggestions = get_gate_downgrade_suggestions(gate_id, date_str, status)
+    return JSONResponse(content=suggestions)
+
+
+@app.post("/api/defense/downgrades/{suggestion_id}/status")
+async def api_update_downgrade_status(suggestion_id: int, request: Request):
+    body = await request.json()
+    status = body.get("status", "pending")
+    result = update_downgrade_status(suggestion_id, status)
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/defense/allocations")
+async def api_get_allocations(date_str: str = None, status: str = None):
+    allocations = get_cross_gate_allocations(date_str, status)
+    return JSONResponse(content=allocations)
+
+
+@app.post("/api/defense/allocations/{allocation_id}/status")
+async def api_update_allocation_status(allocation_id: int, request: Request):
+    body = await request.json()
+    status = body.get("status", "proposed")
+    result = update_allocation_status(allocation_id, status)
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/defense/weekly-trend")
+async def api_get_defense_weekly_trend(start_date: str):
+    trend = get_defense_weekly_trend(start_date)
+    return JSONResponse(content=trend)
+
+
+@app.get("/api/defense/allocation-comparison")
+async def api_get_allocation_comparison(start_date: str):
+    comparison = get_allocation_comparison(start_date)
+    return JSONResponse(content=comparison)
+
+
+@app.post("/api/defense/full-evaluation")
+async def api_full_defense_evaluation(request: Request):
+    body = await request.json()
+    start_date = body.get("start_date")
+    if not start_date:
+        return JSONResponse(content={"error": "请提供起始日期"}, status_code=400)
+    result = full_defense_evaluation(start_date)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/defense/non-executable")
+async def api_get_non_executable_rules(gate_id: int, date_str: str, time_period: str):
+    evaluation = evaluate_defense_resources(gate_id, date_str, time_period)
+    if "error" in evaluation:
+        return JSONResponse(content=evaluation, status_code=400)
+    return JSONResponse(content={
+        "rules": evaluation["non_executable_rules"],
+        "can_execute": evaluation["can_execute"],
+    })

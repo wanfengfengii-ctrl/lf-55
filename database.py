@@ -242,5 +242,145 @@ def init_db():
     except Exception:
         pass
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS resource_pools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            resource_type TEXT NOT NULL CHECK(resource_type IN ('guard','patrol','light','repair','reserve')),
+            total_quantity INTEGER NOT NULL DEFAULT 0,
+            allocated_quantity INTEGER NOT NULL DEFAULT 0,
+            unit TEXT NOT NULL DEFAULT '人',
+            description TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS resource_configs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id INTEGER NOT NULL,
+            config_date TEXT NOT NULL,
+            time_period TEXT NOT NULL CHECK(time_period IN ('morning_peak','daytime','evening_peak','night')),
+            guard_count INTEGER NOT NULL DEFAULT 0,
+            patrol_shifts INTEGER NOT NULL DEFAULT 0,
+            patrol_interval INTEGER NOT NULL DEFAULT 60,
+            light_supplies INTEGER NOT NULL DEFAULT 0,
+            repair_occupancy INTEGER NOT NULL DEFAULT 0,
+            reserve_team INTEGER NOT NULL DEFAULT 0,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            UNIQUE(gate_id, config_date, time_period)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS garrison_shifts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id INTEGER NOT NULL,
+            shift_date TEXT NOT NULL,
+            shift_type TEXT NOT NULL CHECK(shift_type IN ('morning','midday','evening','night')),
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            guard_count INTEGER NOT NULL DEFAULT 0,
+            patrol_route TEXT DEFAULT '',
+            assigned_personnel TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'scheduled' CHECK(status IN ('scheduled','confirmed','completed','cancelled')),
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS resource_gaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id INTEGER NOT NULL,
+            gap_date TEXT NOT NULL,
+            time_period TEXT NOT NULL,
+            resource_type TEXT NOT NULL CHECK(resource_type IN ('guard','patrol','light','repair','reserve')),
+            required_quantity INTEGER NOT NULL DEFAULT 0,
+            available_quantity INTEGER NOT NULL DEFAULT 0,
+            gap_quantity INTEGER NOT NULL DEFAULT 0,
+            severity TEXT NOT NULL DEFAULT 'warning' CHECK(severity IN ('info','warning','critical')),
+            description TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','ignored')),
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS gate_downgrade_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id INTEGER NOT NULL,
+            suggest_date TEXT NOT NULL,
+            time_period TEXT NOT NULL,
+            current_level TEXT NOT NULL,
+            suggested_level TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            expected_guard_saving INTEGER NOT NULL DEFAULT 0,
+            expected_patrol_saving INTEGER NOT NULL DEFAULT 0,
+            impact_assessment TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','implemented')),
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS cross_gate_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            allocation_date TEXT NOT NULL,
+            from_gate_id INTEGER NOT NULL,
+            to_gate_id INTEGER NOT NULL,
+            resource_type TEXT NOT NULL CHECK(resource_type IN ('guard','patrol','reserve')),
+            transfer_quantity INTEGER NOT NULL DEFAULT 0,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            reason TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','approved','in_progress','completed','cancelled')),
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (from_gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            FOREIGN KEY (to_gate_id) REFERENCES gates(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS defense_evaluation_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            evaluate_date TEXT NOT NULL,
+            gate_id INTEGER NOT NULL,
+            time_period TEXT NOT NULL,
+            overall_score INTEGER NOT NULL DEFAULT 0,
+            guard_sufficiency REAL NOT NULL DEFAULT 0,
+            patrol_sufficiency REAL NOT NULL DEFAULT 0,
+            light_sufficiency REAL NOT NULL DEFAULT 0,
+            repair_sufficiency REAL NOT NULL DEFAULT 0,
+            reserve_sufficiency REAL NOT NULL DEFAULT 0,
+            has_gap INTEGER NOT NULL DEFAULT 0,
+            gaps_count INTEGER NOT NULL DEFAULT 0,
+            non_executable_rules TEXT DEFAULT '',
+            evaluation_data TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            UNIQUE(evaluate_date, gate_id, time_period)
+        )
+    """)
+
+    try:
+        c.execute("ALTER TABLE gates ADD COLUMN defense_level TEXT NOT NULL DEFAULT 'normal' CHECK(defense_level IN ('minimal','reduced','normal','enhanced','maximum'))")
+    except Exception:
+        pass
+
+    try:
+        c.execute("ALTER TABLE gates ADD COLUMN min_guard_required INTEGER NOT NULL DEFAULT 2")
+    except Exception:
+        pass
+
+    try:
+        c.execute("ALTER TABLE gates ADD COLUMN min_patrol_required INTEGER NOT NULL DEFAULT 1")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()

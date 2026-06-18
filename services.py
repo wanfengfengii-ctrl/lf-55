@@ -1254,3 +1254,1105 @@ def get_overload_warnings(start_date: str) -> list[dict]:
         result.append(d)
     conn.close()
     return result
+
+
+_DEFENSE_LEVEL_MULTIPLIERS = {
+    "minimal": {"guard": 0.5, "patrol": 0.5, "light": 0.3, "repair": 0.3, "reserve": 0.2},
+    "reduced": {"guard": 0.75, "patrol": 0.75, "light": 0.6, "repair": 0.5, "reserve": 0.5},
+    "normal": {"guard": 1.0, "patrol": 1.0, "light": 1.0, "repair": 1.0, "reserve": 1.0},
+    "enhanced": {"guard": 1.5, "patrol": 1.5, "light": 1.3, "repair": 1.2, "reserve": 1.5},
+    "maximum": {"guard": 2.0, "patrol": 2.0, "light": 1.8, "repair": 1.5, "reserve": 2.0},
+}
+
+_ALERT_LEVEL_MULTIPLIERS = {
+    1: {"guard": 1.0, "patrol": 1.0, "light": 1.0, "repair": 1.0, "reserve": 1.0},
+    2: {"guard": 1.2, "patrol": 1.2, "light": 1.1, "repair": 1.0, "reserve": 1.3},
+    3: {"guard": 1.5, "patrol": 1.5, "light": 1.3, "repair": 1.2, "reserve": 1.6},
+    4: {"guard": 1.8, "patrol": 1.8, "light": 1.6, "repair": 1.4, "reserve": 2.0},
+    5: {"guard": 2.5, "patrol": 2.5, "light": 2.0, "repair": 1.8, "reserve": 3.0},
+}
+
+_TIME_PERIOD_MULTIPLIERS = {
+    "morning_peak": {"guard": 1.3, "patrol": 1.2, "light": 0.8, "repair": 0.5, "reserve": 1.2},
+    "daytime": {"guard": 1.0, "patrol": 1.0, "light": 0.6, "repair": 1.0, "reserve": 1.0},
+    "evening_peak": {"guard": 1.4, "patrol": 1.3, "light": 1.0, "repair": 0.5, "reserve": 1.3},
+    "night": {"guard": 0.8, "patrol": 1.5, "light": 1.5, "repair": 1.2, "reserve": 1.5},
+}
+
+_SHIFT_TIME_RANGES = {
+    "morning": ("06:00", "12:00"),
+    "midday": ("12:00", "18:00"),
+    "evening": ("18:00", "24:00"),
+    "night": ("00:00", "06:00"),
+}
+
+_PERIOD_LABELS = {
+    "morning_peak": "早高峰",
+    "daytime": "日间",
+    "evening_peak": "晚高峰",
+    "night": "夜间",
+}
+
+_RESOURCE_TYPE_LABELS = {
+    "guard": "守军",
+    "patrol": "巡逻",
+    "light": "灯火",
+    "repair": "检修",
+    "reserve": "预备队",
+}
+
+
+def init_resource_pools() -> dict:
+    conn = get_db()
+    c = conn.cursor()
+    default_pools = [
+        ("guard", 50, 0, "人", "城门守军总数"),
+        ("patrol", 20, 0, "队", "巡逻队伍总数"),
+        ("light", 200, 0, "盏", "灯火物资总数"),
+        ("repair", 10, 0, "组", "检修班组总数"),
+        ("reserve", 30, 0, "人", "应急预备队总数"),
+    ]
+    for rtype, total, alloc, unit, desc in default_pools:
+        existing = c.execute("SELECT id FROM resource_pools WHERE resource_type = ?", (rtype,)).fetchone()
+        if not existing:
+            c.execute(
+                "INSERT INTO resource_pools (resource_type, total_quantity, allocated_quantity, unit, description) VALUES (?,?,?,?,?)",
+                (rtype, total, alloc, unit, desc),
+            )
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+
+def get_resource_pools() -> list[dict]:
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM resource_pools ORDER BY id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_resource_pool(resource_type: str, total_quantity: int) -> dict:
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE resource_pools SET total_quantity = ? WHERE resource_type = ?",
+            (total_quantity, resource_type),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return {"success": False, "error": str(e)}
+    conn.close()
+    return {"success": True}
+
+
+def get_resource_config(gate_id: int, config_date: str, time_period: str) -> dict:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM resource_configs WHERE gate_id = ? AND config_date = ? AND time_period = ?",
+        (gate_id, config_date, time_period),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_all_resource_configs_for_date(config_date: str) -> list[dict]:
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT rc.*, g.gate_name, g.gate_code, g.defense_level, g.min_guard_required, g.min_patrol_required
+           FROM resource_configs rc JOIN gates g ON rc.gate_id = g.id
+           WHERE rc.config_date = ? ORDER BY g.id, rc.time_period""",
+        (config_date,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_resource_config(gate_id: int, config_date: str, time_period: str,
+                        guard_count: int, patrol_shifts: int, patrol_interval: int,
+                        light_supplies: int, repair_occupancy: int, reserve_team: int,
+                        notes: str = "") -> dict:
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO resource_configs
+               (gate_id, config_date, time_period, guard_count, patrol_shifts, patrol_interval,
+                light_supplies, repair_occupancy, reserve_team, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (gate_id, config_date, time_period, guard_count, patrol_shifts, patrol_interval,
+             light_supplies, repair_occupancy, reserve_team, notes),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return {"success": False, "error": str(e)}
+    conn.close()
+    return {"success": True}
+
+
+def delete_resource_config(config_id: int) -> dict:
+    conn = get_db()
+    conn.execute("DELETE FROM resource_configs WHERE id = ?", (config_id,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+
+def _get_base_requirements(gate: dict, alert: dict = None) -> dict:
+    base_guard = max(gate["min_guard_required"], 4 if gate["is_main"] else 2)
+    base_patrol = max(gate["min_patrol_required"], 2 if gate["is_main"] else 1)
+    base_light = 10 if gate["is_main"] else 5
+    base_repair = 2 if gate["is_main"] else 1
+    base_reserve = 6 if gate["is_main"] else 3
+
+    defense_mult = _DEFENSE_LEVEL_MULTIPLIERS.get(gate["defense_level"], _DEFENSE_LEVEL_MULTIPLIERS["normal"])
+
+    alert_mult = _ALERT_LEVEL_MULTIPLIERS[1]
+    if alert:
+        alert_mult = _ALERT_LEVEL_MULTIPLIERS.get(alert["level_value"], _ALERT_LEVEL_MULTIPLIERS[1])
+
+    return {
+        "guard": int(base_guard * defense_mult["guard"] * alert_mult["guard"]),
+        "patrol": int(base_patrol * defense_mult["patrol"] * alert_mult["patrol"]),
+        "light": int(base_light * defense_mult["light"] * alert_mult["light"]),
+        "repair": int(base_repair * defense_mult["repair"] * alert_mult["repair"]),
+        "reserve": int(base_reserve * defense_mult["reserve"] * alert_mult["reserve"]),
+    }
+
+
+def calculate_resource_requirements(gate_id: int, date_str: str, time_period: str) -> dict:
+    conn = get_db()
+    gate = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+    if not gate:
+        conn.close()
+        return {"error": "城门不存在"}
+
+    alert = get_alert_for_date(date_str)
+    festival = get_festival_for_date(date_str)
+    temp_controls = get_active_temp_controls_for_gate(gate_id, date_str)
+    traffic_pred = conn.execute(
+        "SELECT * FROM traffic_predictions WHERE gate_id = ? AND predict_date = ? AND time_period = ?",
+        (gate_id, date_str, time_period),
+    ).fetchone()
+
+    base_reqs = _get_base_requirements(dict(gate), alert)
+    period_mult = _TIME_PERIOD_MULTIPLIERS.get(time_period, _TIME_PERIOD_MULTIPLIERS["daytime"])
+
+    for key in base_reqs:
+        base_reqs[key] = int(base_reqs[key] * period_mult[key])
+
+    if festival and time_period in ["evening_peak", "night"]:
+        base_reqs["guard"] = int(base_reqs["guard"] * 1.3)
+        base_reqs["light"] = int(base_reqs["light"] * 1.5)
+        base_reqs["patrol"] = int(base_reqs["patrol"] * 1.2)
+
+    if traffic_pred and traffic_pred["is_overload"]:
+        overload_factor = min(2.0, traffic_pred["overload_ratio"])
+        base_reqs["guard"] = int(base_reqs["guard"] * overload_factor)
+        base_reqs["patrol"] = int(base_reqs["patrol"] * overload_factor)
+        base_reqs["reserve"] = int(base_reqs["reserve"] * overload_factor)
+
+    for tc in temp_controls:
+        if tc["action_type"] == "force_close":
+            base_reqs["guard"] = int(base_reqs["guard"] * 0.3)
+            base_reqs["patrol"] = int(base_reqs["patrol"] * 0.5)
+            base_reqs["light"] = 0
+            base_reqs["repair"] = 0
+        elif tc["action_type"] == "force_open":
+            base_reqs["guard"] = int(base_reqs["guard"] * 1.5)
+            base_reqs["patrol"] = int(base_reqs["patrol"] * 1.3)
+            base_reqs["reserve"] = int(base_reqs["reserve"] * 1.5)
+
+    conn.close()
+    return base_reqs
+
+
+def _check_non_executable_rules(gate_id: int, date_str: str, config: dict, reqs: dict) -> list[str]:
+    rules = []
+
+    schedule = generate_schedule_for_gate_date(gate_id, date_str)
+    if schedule.get("has_conflict"):
+        rules.extend([f"排班冲突: {c}" for c in schedule["conflicts"]])
+
+    if config["guard_count"] < reqs["guard"] * 0.5:
+        rules.append(f"守军配置严重不足，仅为需求的{int(config['guard_count']/reqs['guard']*100)}%")
+
+    if config["patrol_shifts"] < 1:
+        rules.append("至少需要配置1个巡逻班次")
+
+    if config["guard_count"] < 2:
+        rules.append("守军人数不能少于2人")
+
+    if config["repair_occupancy"] > 0 and config["guard_count"] < 3:
+        rules.append("有检修占道时守军人数不能少于3人")
+
+    conn = get_db()
+    gate = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+    if gate and config["guard_count"] < gate["min_guard_required"]:
+        rules.append(f"守军人数低于城门最低要求{gate['min_guard_required']}人")
+    conn.close()
+
+    return rules
+
+
+def evaluate_defense_resources(gate_id: int, date_str: str, time_period: str) -> dict:
+    conn = get_db()
+    gate = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+    if not gate:
+        conn.close()
+        return {"error": "城门不存在"}
+    gate_dict = dict(gate)
+    conn.close()
+
+    config = get_resource_config(gate_id, date_str, time_period)
+    if not config:
+        default_config = {
+            "guard_count": gate_dict["min_guard_required"],
+            "patrol_shifts": gate_dict["min_patrol_required"],
+            "patrol_interval": 60,
+            "light_supplies": 10 if gate_dict["is_main"] else 5,
+            "repair_occupancy": 0,
+            "reserve_team": 3 if gate_dict["is_main"] else 1,
+        }
+        config = default_config
+
+    reqs = calculate_resource_requirements(gate_id, date_str, time_period)
+    if "error" in reqs:
+        return reqs
+
+    non_executable = _check_non_executable_rules(gate_id, date_str, config, reqs)
+
+    sufficiencies = {}
+    for rtype in ["guard", "patrol", "light", "repair", "reserve"]:
+        available = config.get(f"{rtype}_count" if rtype != "light" and rtype != "repair" and rtype != "reserve"
+                               else "light_supplies" if rtype == "light"
+                               else "repair_occupancy" if rtype == "repair"
+                               else "reserve_team", 0)
+        if rtype == "patrol":
+            available = config.get("patrol_shifts", 0)
+        required = reqs[rtype]
+        if required > 0:
+            sufficiencies[rtype] = min(1.0, available / required)
+        else:
+            sufficiencies[rtype] = 1.0
+
+    overall_score = int(sum(sufficiencies.values()) / len(sufficiencies) * 100)
+    has_gap = any(s < 1.0 for s in sufficiencies.values())
+    gaps_count = sum(1 for s in sufficiencies.values() if s < 1.0)
+
+    eval_data = json.dumps({
+        "config": config,
+        "requirements": reqs,
+        "sufficiencies": sufficiencies,
+    }, ensure_ascii=False)
+
+    conn = get_db()
+    c = conn.cursor()
+    c.execute(
+        """INSERT OR REPLACE INTO defense_evaluation_results
+           (evaluate_date, gate_id, time_period, overall_score,
+            guard_sufficiency, patrol_sufficiency, light_sufficiency,
+            repair_sufficiency, reserve_sufficiency, has_gap, gaps_count,
+            non_executable_rules, evaluation_data)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (date_str, gate_id, time_period, overall_score,
+         sufficiencies["guard"], sufficiencies["patrol"], sufficiencies["light"],
+         sufficiencies["repair"], sufficiencies["reserve"],
+         1 if has_gap else 0, gaps_count,
+         "; ".join(non_executable), eval_data),
+    )
+    conn.commit()
+    conn.close()
+
+    return {
+        "gate_id": gate_id,
+        "gate_name": gate_dict["gate_name"],
+        "date": date_str,
+        "time_period": time_period,
+        "period_label": _PERIOD_LABELS.get(time_period, time_period),
+        "config": config,
+        "requirements": reqs,
+        "sufficiencies": sufficiencies,
+        "overall_score": overall_score,
+        "has_gap": has_gap,
+        "gaps_count": gaps_count,
+        "non_executable_rules": non_executable,
+        "can_execute": len(non_executable) == 0,
+    }
+
+
+def detect_resource_gaps(gate_id: int, date_str: str) -> list[dict]:
+    conn = get_db()
+    gate = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+    if not gate:
+        conn.close()
+        return []
+    gate_name = gate["gate_name"]
+    conn.close()
+
+    gaps = []
+    periods = ["morning_peak", "daytime", "evening_peak", "night"]
+    gap_data = []
+
+    for period in periods:
+        evaluation = evaluate_defense_resources(gate_id, date_str, period)
+        if "error" in evaluation:
+            continue
+
+        config = evaluation["config"]
+        reqs = evaluation["requirements"]
+        sufficiencies = evaluation["sufficiencies"]
+
+        for rtype in ["guard", "patrol", "light", "repair", "reserve"]:
+            available = config.get(f"{rtype}_count" if rtype != "light" and rtype != "repair" and rtype != "reserve"
+                                   else "light_supplies" if rtype == "light"
+                                   else "repair_occupancy" if rtype == "repair"
+                                   else "reserve_team", 0)
+            if rtype == "patrol":
+                available = config.get("patrol_shifts", 0)
+            required = reqs[rtype]
+            gap = max(0, required - available)
+
+            if gap > 0:
+                suf = sufficiencies[rtype]
+                severity = "critical" if suf < 0.5 else "warning" if suf < 0.8 else "info"
+                gap_data.append({
+                    "period": period,
+                    "rtype": rtype,
+                    "required": required,
+                    "available": available,
+                    "gap": gap,
+                    "severity": severity,
+                    "sufficiency": suf,
+                })
+
+    conn = get_db()
+    for data in gap_data:
+        period = data["period"]
+        rtype = data["rtype"]
+        required = data["required"]
+        available = data["available"]
+        gap = data["gap"]
+        severity = data["severity"]
+
+        existing = conn.execute(
+            """SELECT id FROM resource_gaps
+               WHERE gate_id = ? AND gap_date = ? AND time_period = ? AND resource_type = ? AND status = 'open'""",
+            (gate_id, date_str, period, rtype),
+        ).fetchone()
+
+        if not existing:
+            conn.execute(
+                """INSERT INTO resource_gaps
+                   (gate_id, gap_date, time_period, resource_type,
+                    required_quantity, available_quantity, gap_quantity,
+                    severity, description, status)
+                   VALUES (?,?,?,?,?,?,?,?,?,'open')""",
+                (gate_id, date_str, period, rtype,
+                 required, available, gap, severity,
+                 f"{_RESOURCE_TYPE_LABELS[rtype]}缺口{gap}个单位"),
+            )
+            gap_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        else:
+            gap_id = existing["id"]
+            conn.execute(
+                """UPDATE resource_gaps
+                   SET required_quantity = ?, available_quantity = ?, gap_quantity = ?, severity = ?
+                   WHERE id = ?""",
+                (required, available, gap, severity, gap_id),
+            )
+
+        gaps.append({
+                    "id": gap_id,
+                    "gate_id": gate_id,
+                    "gate_name": gate_name,
+                    "date": date_str,
+                    "time_period": period,
+                    "period_label": _PERIOD_LABELS.get(period, period),
+                    "resource_type": rtype,
+                    "resource_label": _RESOURCE_TYPE_LABELS[rtype],
+                    "required": required,
+                    "available": available,
+                    "gap": gap,
+                    "severity": severity,
+                    "status": "open",
+                })
+
+    conn.commit()
+    conn.close()
+    return gaps
+
+
+def generate_garrison_shifts(gate_id: int, date_str: str) -> list[dict]:
+    conn = get_db()
+    gate = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+    if not gate:
+        conn.close()
+        return []
+
+    schedule = generate_schedule_for_gate_date(gate_id, date_str)
+    if "error" in schedule:
+        conn.close()
+        return []
+
+    open_time = schedule["final"]["open"]
+    close_time = schedule["final"]["close"]
+    open_min = _time_to_minutes(open_time)
+    close_min = _time_to_minutes(close_time)
+
+    shifts = []
+    c = conn.cursor()
+
+    for shift_type, (shift_start, shift_end) in _SHIFT_TIME_RANGES.items():
+        ss_min = _time_to_minutes(shift_start)
+        se_min = _time_to_minutes(shift_end) if shift_end != "24:00" else 1440
+
+        if close_min <= open_min:
+            overlap = True
+        else:
+            overlap = (ss_min < close_min) and (se_min > open_min)
+
+        if not overlap:
+            continue
+
+        config = None
+        if shift_type == "morning":
+            config = get_resource_config(gate_id, date_str, "morning_peak")
+        elif shift_type == "midday":
+            config = get_resource_config(gate_id, date_str, "daytime")
+        elif shift_type == "evening":
+            config = get_resource_config(gate_id, date_str, "evening_peak")
+        else:
+            config = get_resource_config(gate_id, date_str, "night")
+
+        guard_count = config["guard_count"] if config else gate["min_guard_required"]
+        patrol_shifts = config["patrol_shifts"] if config else gate["min_patrol_required"]
+
+        effective_start = _minutes_to_time(max(ss_min, open_min))
+        effective_end = _minutes_to_time(min(se_min, close_min) if close_min > open_min else min(se_min, 1440))
+
+        c.execute(
+            """INSERT OR REPLACE INTO garrison_shifts
+               (gate_id, shift_date, shift_type, start_time, end_time,
+                guard_count, patrol_route, status)
+               VALUES (?,?,?,?,?,?,?,'scheduled')""",
+            (gate_id, date_str, shift_type, effective_start, effective_end,
+             guard_count, f"{gate['gate_name']}周边巡逻"),
+        )
+
+        shift_id = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+        shifts.append({
+            "id": shift_id,
+            "gate_id": gate_id,
+            "gate_name": gate["gate_name"],
+            "date": date_str,
+            "shift_type": shift_type,
+            "start_time": effective_start,
+            "end_time": effective_end,
+            "guard_count": guard_count,
+            "patrol_shifts": patrol_shifts,
+            "status": "scheduled",
+        })
+
+    conn.commit()
+    conn.close()
+    return shifts
+
+
+def get_garrison_shifts(gate_id: int = None, date_str: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT gs.*, g.gate_name, g.gate_code FROM garrison_shifts gs
+               JOIN gates g ON gs.gate_id = g.id WHERE 1=1"""
+    params = []
+    if gate_id:
+        query += " AND gs.gate_id = ?"
+        params.append(gate_id)
+    if date_str:
+        query += " AND gs.shift_date = ?"
+        params.append(date_str)
+    query += " ORDER BY gs.shift_date, g.id, gs.start_time"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def suggest_gate_downgrade(gate_id: int, date_str: str) -> list[dict]:
+    conn = get_db()
+    gate = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+    if not gate:
+        conn.close()
+        return []
+
+    suggestions = []
+    periods = ["morning_peak", "daytime", "evening_peak", "night"]
+    levels_order = ["minimal", "reduced", "normal", "enhanced", "maximum"]
+    current_idx = levels_order.index(gate["defense_level"]) if gate["defense_level"] in levels_order else 2
+
+    for period in periods:
+        gaps = conn.execute(
+            """SELECT * FROM resource_gaps
+               WHERE gate_id = ? AND gap_date = ? AND time_period = ? AND status = 'open'
+               ORDER BY severity DESC""",
+            (gate_id, date_str, period),
+        ).fetchall()
+
+        if not gaps:
+            continue
+
+        critical_count = sum(1 for g in gaps if g["severity"] == "critical")
+        if critical_count == 0:
+            continue
+
+        if current_idx > 0:
+            suggested_level = levels_order[current_idx - 1]
+            current_mult = _DEFENSE_LEVEL_MULTIPLIERS[gate["defense_level"]]
+            suggested_mult = _DEFENSE_LEVEL_MULTIPLIERS[suggested_level]
+
+            guard_saving = 0
+            patrol_saving = 0
+            for g in gaps:
+                if g["resource_type"] == "guard":
+                    guard_saving += int(g["required_quantity"] * (1 - suggested_mult["guard"] / current_mult["guard"]))
+                elif g["resource_type"] == "patrol":
+                    patrol_saving += int(g["required_quantity"] * (1 - suggested_mult["patrol"] / current_mult["patrol"]))
+
+            existing = conn.execute(
+                """SELECT id FROM gate_downgrade_suggestions
+                   WHERE gate_id = ? AND suggest_date = ? AND time_period = ? AND status IN ('pending','approved')""",
+                (gate_id, date_str, period),
+            ).fetchone()
+
+            if not existing:
+                conn.execute(
+                    """INSERT INTO gate_downgrade_suggestions
+                       (gate_id, suggest_date, time_period, current_level, suggested_level,
+                        reason, expected_guard_saving, expected_patrol_saving, impact_assessment, status)
+                       VALUES (?,?,?,?,?,?,?,?,?,'pending')""",
+                    (gate_id, date_str, period, gate["defense_level"], suggested_level,
+                     f"{_PERIOD_LABELS[period]}存在{critical_count}项严重资源缺口，建议降级防御等级",
+                     guard_saving, patrol_saving,
+                     f"降级后可节省{guard_saving}名守军和{patrol_saving}个巡逻班次用于缺口填补，但通行效率可能下降"),
+                )
+                sugg_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            else:
+                sugg_id = existing["id"]
+
+            suggestions.append({
+                "id": sugg_id,
+                "gate_id": gate_id,
+                "gate_name": gate["gate_name"],
+                "date": date_str,
+                "time_period": period,
+                "period_label": _PERIOD_LABELS.get(period, period),
+                "current_level": gate["defense_level"],
+                "suggested_level": suggested_level,
+                "guard_saving": guard_saving,
+                "patrol_saving": patrol_saving,
+                "critical_gaps": critical_count,
+            })
+
+    conn.commit()
+    conn.close()
+    return suggestions
+
+
+def get_gate_downgrade_suggestions(gate_id: int = None, date_str: str = None, status: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT gds.*, g.gate_name, g.gate_code FROM gate_downgrade_suggestions gds
+               JOIN gates g ON gds.gate_id = g.id WHERE 1=1"""
+    params = []
+    if gate_id:
+        query += " AND gds.gate_id = ?"
+        params.append(gate_id)
+    if date_str:
+        query += " AND gds.suggest_date = ?"
+        params.append(date_str)
+    if status:
+        query += " AND gds.status = ?"
+        params.append(status)
+    query += " ORDER BY gds.suggest_date, g.id, gds.time_period"
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["period_label"] = _PERIOD_LABELS.get(d["time_period"], d["time_period"])
+        result.append(d)
+    conn.close()
+    return result
+
+
+def generate_cross_gate_allocation(date_str: str) -> list[dict]:
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    if not gates:
+        conn.close()
+        return []
+
+    allocations = []
+    periods = ["morning_peak", "daytime", "evening_peak", "night"]
+
+    for period in periods:
+        surplus_gates = []
+        deficit_gates = []
+
+        for gate in gates:
+            gate_dict = dict(gate)
+            config = get_resource_config(gate["id"], date_str, period)
+            reqs = calculate_resource_requirements(gate["id"], date_str, period)
+            if "error" in reqs:
+                continue
+
+            if not config:
+                config = {
+                    "guard_count": gate_dict["min_guard_required"],
+                    "patrol_shifts": gate_dict["min_patrol_required"],
+                    "reserve_team": 3 if gate_dict["is_main"] else 1,
+                }
+
+            guard_surplus = config["guard_count"] - reqs["guard"]
+            patrol_surplus = config["patrol_shifts"] - reqs["patrol"]
+            reserve_surplus = config["reserve_team"] - reqs["reserve"]
+
+            if guard_surplus > 0 or patrol_surplus > 0 or reserve_surplus > 0:
+                surplus_gates.append({
+                    "gate": gate_dict,
+                    "guard": guard_surplus,
+                    "patrol": patrol_surplus,
+                    "reserve": reserve_surplus,
+                })
+
+            if guard_surplus < 0 or patrol_surplus < 0 or reserve_surplus < 0:
+                deficit_gates.append({
+                    "gate": gate_dict,
+                    "guard": -guard_surplus if guard_surplus < 0 else 0,
+                    "patrol": -patrol_surplus if patrol_surplus < 0 else 0,
+                    "reserve": -reserve_surplus if reserve_surplus < 0 else 0,
+                })
+
+        for deficit in deficit_gates:
+            for rtype in ["guard", "patrol", "reserve"]:
+                needed = deficit[rtype]
+                if needed <= 0:
+                    continue
+
+                for surplus in surplus_gates:
+                    available = surplus[rtype]
+                    if available <= 0:
+                        continue
+
+                    transfer = min(needed, available, 3 if rtype == "guard" else 1)
+                    if transfer <= 0:
+                        continue
+
+                    time_start = "06:00" if period == "morning_peak" else \
+                                "12:00" if period == "daytime" else \
+                                "17:00" if period == "evening_peak" else "22:00"
+                    time_end = "12:00" if period == "morning_peak" else \
+                              "18:00" if period == "daytime" else \
+                              "22:00" if period == "evening_peak" else "06:00"
+
+                    existing = conn.execute(
+                        """SELECT id FROM cross_gate_allocations
+                           WHERE allocation_date = ? AND from_gate_id = ? AND to_gate_id = ?
+                           AND resource_type = ? AND status IN ('proposed','approved','in_progress')""",
+                        (date_str, surplus["gate"]["id"], deficit["gate"]["id"], rtype),
+                    ).fetchone()
+
+                    if not existing:
+                        conn.execute(
+                            """INSERT INTO cross_gate_allocations
+                               (allocation_date, from_gate_id, to_gate_id, resource_type,
+                                transfer_quantity, start_time, end_time, reason, status)
+                               VALUES (?,?,?,?,?,?,?,?,'proposed')""",
+                            (date_str, surplus["gate"]["id"], deficit["gate"]["id"], rtype,
+                             transfer, time_start, time_end,
+                             f"{_PERIOD_LABELS[period]}{surplus['gate']['gate_name']}可调配{_RESOURCE_TYPE_LABELS[rtype]}至{deficit['gate']['gate_name']}"),
+                        )
+                        alloc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    else:
+                        alloc_id = existing["id"]
+
+                    allocations.append({
+                        "id": alloc_id,
+                        "date": date_str,
+                        "time_period": period,
+                        "period_label": _PERIOD_LABELS.get(period, period),
+                        "from_gate_id": surplus["gate"]["id"],
+                        "from_gate_name": surplus["gate"]["gate_name"],
+                        "to_gate_id": deficit["gate"]["id"],
+                        "to_gate_name": deficit["gate"]["gate_name"],
+                        "resource_type": rtype,
+                        "resource_label": _RESOURCE_TYPE_LABELS[rtype],
+                        "transfer_quantity": transfer,
+                        "start_time": time_start,
+                        "end_time": time_end,
+                    })
+
+                    surplus[rtype] -= transfer
+                    deficit[rtype] -= transfer
+                    needed -= transfer
+                    if needed <= 0:
+                        break
+
+    conn.commit()
+    conn.close()
+    return allocations
+
+
+def get_cross_gate_allocations(date_str: str = None, status: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT cga.*, fg.gate_name as from_gate_name, tg.gate_name as to_gate_name
+               FROM cross_gate_allocations cga
+               JOIN gates fg ON cga.from_gate_id = fg.id
+               JOIN gates tg ON cga.to_gate_id = tg.id WHERE 1=1"""
+    params = []
+    if date_str:
+        query += " AND cga.allocation_date = ?"
+        params.append(date_str)
+    if status:
+        query += " AND cga.status = ?"
+        params.append(status)
+    query += " ORDER BY cga.allocation_date, cga.start_time"
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["resource_label"] = _RESOURCE_TYPE_LABELS.get(d["resource_type"], d["resource_type"])
+        result.append(d)
+    conn.close()
+    return result
+
+
+def update_allocation_status(allocation_id: int, status: str) -> dict:
+    conn = get_db()
+    valid_statuses = ['proposed', 'approved', 'in_progress', 'completed', 'cancelled']
+    if status not in valid_statuses:
+        conn.close()
+        return {"success": False, "error": "无效状态"}
+    try:
+        conn.execute(
+            "UPDATE cross_gate_allocations SET status = ? WHERE id = ?",
+            (status, allocation_id),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return {"success": False, "error": str(e)}
+    conn.close()
+    return {"success": True}
+
+
+def update_gap_status(gap_id: int, status: str) -> dict:
+    conn = get_db()
+    valid_statuses = ['open', 'resolved', 'ignored']
+    if status not in valid_statuses:
+        conn.close()
+        return {"success": False, "error": "无效状态"}
+    try:
+        conn.execute(
+            "UPDATE resource_gaps SET status = ? WHERE id = ?",
+            (status, gap_id),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return {"success": False, "error": str(e)}
+    conn.close()
+    return {"success": True}
+
+
+def update_downgrade_status(suggestion_id: int, status: str) -> dict:
+    conn = get_db()
+    valid_statuses = ['pending', 'approved', 'rejected', 'implemented']
+    if status not in valid_statuses:
+        conn.close()
+        return {"success": False, "error": "无效状态"}
+    try:
+        conn.execute(
+            "UPDATE gate_downgrade_suggestions SET status = ? WHERE id = ?",
+            (status, suggestion_id),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return {"success": False, "error": str(e)}
+    conn.close()
+    return {"success": True}
+
+
+def get_defense_weekly_trend(start_date: str) -> dict:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    conn.close()
+
+    trend_data = {
+        "dates": dates,
+        "gates": [],
+        "avg_scores": [],
+        "total_gaps": [],
+    }
+
+    for gate in gates:
+        gate_data = {
+            "gate_id": gate["id"],
+            "gate_name": gate["gate_name"],
+            "gate_code": gate["gate_code"],
+            "overall_scores": [],
+            "guard_counts": [],
+            "patrol_shifts": [],
+            "light_supplies": [],
+            "gap_counts": [],
+        }
+        for date_str in dates:
+            day_score = 0
+            day_guard = 0
+            day_patrol = 0
+            day_light = 0
+            day_gaps = 0
+            count = 0
+
+            conn = get_db()
+            for period in ["morning_peak", "daytime", "evening_peak", "night"]:
+                eval_row = conn.execute(
+                    """SELECT * FROM defense_evaluation_results
+                       WHERE evaluate_date = ? AND gate_id = ? AND time_period = ?""",
+                    (date_str, gate["id"], period),
+                ).fetchone()
+
+                if eval_row:
+                    day_score += eval_row["overall_score"]
+                    day_gaps += eval_row["gaps_count"]
+                    count += 1
+            conn.close()
+
+            for period in ["morning_peak", "daytime", "evening_peak", "night"]:
+                config = get_resource_config(gate["id"], date_str, period)
+                if config:
+                    day_guard += config["guard_count"]
+                    day_patrol += config["patrol_shifts"]
+                    day_light += config["light_supplies"]
+
+            gate_data["overall_scores"].append(int(day_score / count) if count > 0 else 0)
+            gate_data["guard_counts"].append(day_guard)
+            gate_data["patrol_shifts"].append(day_patrol)
+            gate_data["light_supplies"].append(day_light)
+            gate_data["gap_counts"].append(day_gaps)
+
+        trend_data["gates"].append(gate_data)
+
+    for i in range(7):
+        day_scores = [g["overall_scores"][i] for g in trend_data["gates"]]
+        day_gaps = [g["gap_counts"][i] for g in trend_data["gates"]]
+        trend_data["avg_scores"].append(int(sum(day_scores) / len(day_scores)) if day_scores else 0)
+        trend_data["total_gaps"].append(sum(day_gaps))
+
+    return trend_data
+
+
+def get_allocation_comparison(start_date: str) -> dict:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    conn.close()
+
+    comparison = {
+        "dates": dates,
+        "gates": [],
+        "before": {"avg_score": 0, "total_gaps": 0},
+        "after": {"avg_score": 0, "total_gaps": 0},
+    }
+
+    total_before_gaps = 0
+    total_after_gaps = 0
+    total_before_score = 0
+    total_after_score = 0
+    count = 0
+
+    for gate in gates:
+        gate_data = {
+            "gate_id": gate["id"],
+            "gate_name": gate["gate_name"],
+            "before": {"guard": [], "patrol": [], "gap_count": []},
+            "after": {"guard": [], "patrol": [], "gap_count": []},
+        }
+
+        for date_str in dates:
+            before_guard = 0
+            before_patrol = 0
+            after_guard = 0
+            after_patrol = 0
+            before_gaps = 0
+            after_gaps = 0
+            before_suf = 0
+            after_suf = 0
+            period_count = 0
+
+            conn = get_db()
+            allocations = conn.execute(
+                """SELECT * FROM cross_gate_allocations
+                   WHERE allocation_date = ? AND (from_gate_id = ? OR to_gate_id = ?)
+                   AND status IN ('approved','in_progress','completed')""",
+                (date_str, gate["id"], gate["id"]),
+            ).fetchall()
+            conn.close()
+
+            for period in ["morning_peak", "daytime", "evening_peak", "night"]:
+                config = get_resource_config(gate["id"], date_str, period)
+                reqs = calculate_resource_requirements(gate["id"], date_str, period)
+                if "error" in reqs:
+                    continue
+                if not config:
+                    config = {
+                        "guard_count": gate["min_guard_required"],
+                        "patrol_shifts": gate["min_patrol_required"],
+                    }
+
+                before_guard += config["guard_count"]
+                before_patrol += config["patrol_shifts"]
+                before_gaps += max(0, reqs["guard"] - config["guard_count"])
+                before_gaps += max(0, reqs["patrol"] - config["patrol_shifts"])
+
+                adjusted_guard = config["guard_count"]
+                adjusted_patrol = config["patrol_shifts"]
+
+                for alloc in allocations:
+                    if alloc["time_period"] == period:
+                        if alloc["to_gate_id"] == gate["id"]:
+                            if alloc["resource_type"] == "guard":
+                                adjusted_guard += alloc["transfer_quantity"]
+                            elif alloc["resource_type"] == "patrol":
+                                adjusted_patrol += alloc["transfer_quantity"]
+                        elif alloc["from_gate_id"] == gate["id"]:
+                            if alloc["resource_type"] == "guard":
+                                adjusted_guard -= alloc["transfer_quantity"]
+                            elif alloc["resource_type"] == "patrol":
+                                adjusted_patrol -= alloc["transfer_quantity"]
+
+                after_guard += adjusted_guard
+                after_patrol += adjusted_patrol
+                after_gaps += max(0, reqs["guard"] - adjusted_guard)
+                after_gaps += max(0, reqs["patrol"] - adjusted_patrol)
+
+                guard_suf_before = min(1.0, config["guard_count"] / reqs["guard"]) if reqs["guard"] > 0 else 1.0
+                patrol_suf_before = min(1.0, config["patrol_shifts"] / reqs["patrol"]) if reqs["patrol"] > 0 else 1.0
+                before_suf += (guard_suf_before + patrol_suf_before) / 2
+
+                guard_suf_after = min(1.0, adjusted_guard / reqs["guard"]) if reqs["guard"] > 0 else 1.0
+                patrol_suf_after = min(1.0, adjusted_patrol / reqs["patrol"]) if reqs["patrol"] > 0 else 1.0
+                after_suf += (guard_suf_after + patrol_suf_after) / 2
+                period_count += 1
+
+            gate_data["before"]["guard"].append(before_guard)
+            gate_data["before"]["patrol"].append(before_patrol)
+            gate_data["before"]["gap_count"].append(before_gaps)
+            gate_data["after"]["guard"].append(after_guard)
+            gate_data["after"]["patrol"].append(after_patrol)
+            gate_data["after"]["gap_count"].append(after_gaps)
+
+            total_before_gaps += before_gaps
+            total_after_gaps += after_gaps
+            if period_count > 0:
+                total_before_score += int(before_suf / period_count * 100)
+                total_after_score += int(after_suf / period_count * 100)
+                count += 1
+
+        comparison["gates"].append(gate_data)
+
+    comparison["before"]["total_gaps"] = total_before_gaps
+    comparison["after"]["total_gaps"] = total_after_gaps
+    comparison["before"]["avg_score"] = int(total_before_score / count) if count > 0 else 0
+    comparison["after"]["avg_score"] = int(total_after_score / count) if count > 0 else 0
+
+    return comparison
+
+
+def get_resource_gaps(gate_id: int = None, date_str: str = None, status: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT rg.*, g.gate_name, g.gate_code FROM resource_gaps rg
+               JOIN gates g ON rg.gate_id = g.id WHERE 1=1"""
+    params = []
+    if gate_id:
+        query += " AND rg.gate_id = ?"
+        params.append(gate_id)
+    if date_str:
+        query += " AND rg.gap_date = ?"
+        params.append(date_str)
+    if status:
+        query += " AND rg.status = ?"
+        params.append(status)
+    query += " ORDER BY rg.gap_date, rg.severity DESC, g.id"
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["period_label"] = _PERIOD_LABELS.get(d["time_period"], d["time_period"])
+        d["resource_label"] = _RESOURCE_TYPE_LABELS.get(d["resource_type"], d["resource_type"])
+        d["date"] = d["gap_date"]
+        d["required"] = d["required_quantity"]
+        d["available"] = d["available_quantity"]
+        d["gap"] = d["gap_quantity"]
+        result.append(d)
+    conn.close()
+    return result
+
+
+def full_defense_evaluation(start_date: str) -> dict:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    conn.close()
+
+    init_resource_pools()
+
+    all_evaluations = []
+    all_gaps = []
+    all_shifts = []
+    all_downgrades = []
+    all_allocations = []
+
+    for date_str in dates:
+        for gate in gates:
+            for period in ["morning_peak", "daytime", "evening_peak", "night"]:
+                eval_result = evaluate_defense_resources(gate["id"], date_str, period)
+                if "error" not in eval_result:
+                    all_evaluations.append(eval_result)
+
+            gaps = detect_resource_gaps(gate["id"], date_str)
+            all_gaps.extend(gaps)
+
+            shifts = generate_garrison_shifts(gate["id"], date_str)
+            all_shifts.extend(shifts)
+
+            downgrades = suggest_gate_downgrade(gate["id"], date_str)
+            all_downgrades.extend(downgrades)
+
+        allocations = generate_cross_gate_allocation(date_str)
+        all_allocations.extend(allocations)
+
+    critical_gaps = [g for g in all_gaps if g["severity"] == "critical"]
+    open_gaps = [g for g in all_gaps if g["status"] == "open"]
+
+    return {
+        "dates": dates,
+        "evaluations": all_evaluations,
+        "gaps": all_gaps,
+        "shifts": all_shifts,
+        "downgrades": all_downgrades,
+        "allocations": all_allocations,
+        "summary": {
+            "total_gates": len(gates),
+            "total_days": len(dates),
+            "total_periods": len(gates) * len(dates) * 4,
+            "total_gaps": len(all_gaps),
+            "open_gaps": len(open_gaps),
+            "critical_gaps": len(critical_gaps),
+            "total_shifts": len(all_shifts),
+            "total_downgrades": len(all_downgrades),
+            "total_allocations": len(all_allocations),
+            "avg_score": int(sum(e["overall_score"] for e in all_evaluations) / len(all_evaluations)) if all_evaluations else 0,
+        },
+    }

@@ -1,0 +1,869 @@
+{% extends "base.html" %}
+
+{% block title %}城防资源调配 - 古城门启闭排班系统{% endblock %}
+
+{% block content %}
+<div class="defense-page">
+    <div class="page-header">
+        <h1>城防资源占用与值守调配</h1>
+        <div class="date-selector">
+            <label>起始日期：</label>
+            <input type="date" id="startDate" value="{{ start_date }}">
+            <button onclick="changeDate()" class="btn btn-primary">切换</button>
+            <button onclick="runFullEvaluation()" class="btn btn-success">一键全量评估</button>
+        </div>
+    </div>
+
+    <div class="tab-container">
+        <div class="tab-buttons">
+            <button class="tab-btn active" onclick="switchTab('config')">资源配置</button>
+            <button class="tab-btn" onclick="switchTab('trend')">一周资源趋势</button>
+            <button class="tab-btn" onclick="switchTab('comparison')">调配前后对比</button>
+            <button class="tab-btn" onclick="switchTab('shifts')">值守排班</button>
+            <button class="tab-btn" onclick="switchTab('gaps')">资源缺口预警</button>
+            <button class="tab-btn" onclick="switchTab('downgrade')">降级开放建议</button>
+            <button class="tab-btn" onclick="switchTab('allocation')">跨门调配方案</button>
+            <button class="tab-btn" onclick="switchTab('rules')">不可执行规则</button>
+        </div>
+
+        <div id="config" class="tab-content active">
+            <div class="grid-container">
+                <div class="card resource-pool-card">
+                    <h3>资源池总览</h3>
+                    <div class="pool-grid">
+                        {% for pool in pools %}
+                        <div class="pool-item">
+                            <div class="pool-label">{{ {
+                                'guard': '守军',
+                                'patrol': '巡逻队',
+                                'light': '灯火物资',
+                                'repair': '检修班组',
+                                'reserve': '应急预备队'
+                            }[pool.resource_type] }}</div>
+                            <div class="pool-value">{{ pool.total_quantity }} {{ pool.unit }}</div>
+                            <div class="pool-bar">
+                                <div class="pool-bar-fill" style="width: {{ (pool.allocated_quantity / pool.total_quantity * 100) if pool.total_quantity > 0 else 0 }}%"></div>
+                            </div>
+                            <div class="pool-sub">已分配: {{ pool.allocated_quantity }} / 可用: {{ pool.total_quantity - pool.allocated_quantity }}</div>
+                            <button onclick="editPool('{{ pool.resource_type }}', {{ pool.total_quantity }})" class="btn btn-small">调整总量</button>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+
+                <div class="card config-form-card">
+                    <h3>资源配置</h3>
+                    <form id="configForm" action="/defense-resources/config" method="POST">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>城门</label>
+                                <select name="gate_id" id="gateSelect" required>
+                                    {% for gate in gates %}
+                                    <option value="{{ gate.id }}">{{ gate.gate_name }} ({{ gate.gate_code }})</option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>日期</label>
+                                <input type="date" name="config_date" id="configDate" value="{{ start_date }}" required>
+                            </div>
+                            <div class="form-group">
+                                <label>时段</label>
+                                <select name="time_period" id="periodSelect" required>
+                                    <option value="morning_peak">早高峰</option>
+                                    <option value="daytime">日间</option>
+                                    <option value="evening_peak">晚高峰</option>
+                                    <option value="night">夜间</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>守军人数</label>
+                                <input type="number" name="guard_count" id="guardCount" value="4" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label>巡逻班次</label>
+                                <input type="number" name="patrol_shifts" id="patrolShifts" value="2" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label>巡逻间隔(分钟)</label>
+                                <input type="number" name="patrol_interval" id="patrolInterval" value="60" min="15" step="15">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>灯火物资(盏)</label>
+                                <input type="number" name="light_supplies" id="lightSupplies" value="10" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label>检修占道(组)</label>
+                                <input type="number" name="repair_occupancy" id="repairOccupancy" value="0" min="0">
+                            </div>
+                            <div class="form-group">
+                                <label>应急预备队(人)</label>
+                                <input type="number" name="reserve_team" id="reserveTeam" value="3" min="0">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group full-width">
+                                <label>备注</label>
+                                <textarea name="notes" rows="2"></textarea>
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" onclick="loadRequirements()" class="btn btn-info">查看需求计算</button>
+                            <button type="submit" class="btn btn-primary">保存配置</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <div class="card requirements-card" id="requirementsCard" style="display: none;">
+                <h3>资源需求计算</h3>
+                <div id="requirementsContent"></div>
+            </div>
+
+            <div class="card">
+                <h3>今日配置列表</h3>
+                <div id="configList"></div>
+            </div>
+        </div>
+
+        <div id="trend" class="tab-content">
+            <div class="card">
+                <h3>一周资源趋势</h3>
+                <div class="trend-controls">
+                    <label>查看指标：</label>
+                    <select id="trendMetric" onchange="renderTrendChart()">
+                        <option value="overall_scores">综合评分</option>
+                        <option value="guard_counts">守军人数</option>
+                        <option value="patrol_shifts">巡逻班次</option>
+                        <option value="light_supplies">灯火物资</option>
+                        <option value="gap_counts">缺口数量</option>
+                    </select>
+                </div>
+                <div id="trendChart" style="height: 400px;"></div>
+            </div>
+        </div>
+
+        <div id="comparison" class="tab-content">
+            <div class="card">
+                <h3>调配前后对比</h3>
+                <div class="comparison-controls">
+                    <label>选择城门：</label>
+                    <select id="comparisonGate" onchange="renderComparisonChart()">
+                        {% for gate in gates %}
+                        <option value="{{ loop.index0 }}">{{ gate.gate_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <label>对比指标：</label>
+                    <select id="comparisonMetric" onchange="renderComparisonChart()">
+                        <option value="guard">守军人数</option>
+                        <option value="patrol">巡逻班次</option>
+                        <option value="gap_count">缺口数量</option>
+                    </select>
+                </div>
+                <div id="comparisonChart" style="height: 400px;"></div>
+                <div id="comparisonSummary"></div>
+            </div>
+        </div>
+
+        <div id="shifts" class="tab-content">
+            <div class="card">
+                <h3>值守排班</h3>
+                <div id="shiftsList"></div>
+            </div>
+        </div>
+
+        <div id="gaps" class="tab-content">
+            <div class="card">
+                <h3>资源缺口预警</h3>
+                <div class="filter-row">
+                    <label>状态筛选：</label>
+                    <select id="gapStatusFilter" onchange="loadGaps()">
+                        <option value="">全部</option>
+                        <option value="open">未解决</option>
+                        <option value="resolved">已解决</option>
+                        <option value="ignored">已忽略</option>
+                    </select>
+                </div>
+                <div id="gapsList"></div>
+            </div>
+        </div>
+
+        <div id="downgrade" class="tab-content">
+            <div class="card">
+                <h3>城门降级开放建议</h3>
+                <div class="filter-row">
+                    <label>状态筛选：</label>
+                    <select id="downgradeStatusFilter" onchange="loadDowngrades()">
+                        <option value="">全部</option>
+                        <option value="pending">待处理</option>
+                        <option value="approved">已批准</option>
+                        <option value="rejected">已拒绝</option>
+                        <option value="implemented">已实施</option>
+                    </select>
+                </div>
+                <div id="downgradesList"></div>
+            </div>
+        </div>
+
+        <div id="allocation" class="tab-content">
+            <div class="card">
+                <h3>跨门调配方案</h3>
+                <div class="filter-row">
+                    <label>状态筛选：</label>
+                    <select id="allocationStatusFilter" onchange="loadAllocations()">
+                        <option value="">全部</option>
+                        <option value="proposed">建议中</option>
+                        <option value="approved">已批准</option>
+                        <option value="in_progress">执行中</option>
+                        <option value="completed">已完成</option>
+                        <option value="cancelled">已取消</option>
+                    </select>
+                </div>
+                <div id="allocationsList"></div>
+            </div>
+        </div>
+
+        <div id="rules" class="tab-content">
+            <div class="card">
+                <h3>不可执行规则检查</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>城门</label>
+                        <select id="ruleGateSelect">
+                            {% for gate in gates %}
+                            <option value="{{ gate.id }}">{{ gate.gate_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>日期</label>
+                        <input type="date" id="ruleDate" value="{{ start_date }}">
+                    </div>
+                    <div class="form-group">
+                        <label>时段</label>
+                        <select id="rulePeriodSelect">
+                            <option value="morning_peak">早高峰</option>
+                            <option value="daytime">日间</option>
+                            <option value="evening_peak">晚高峰</option>
+                            <option value="night">夜间</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <button onclick="checkRules()" class="btn btn-primary">检查规则</button>
+                    </div>
+                </div>
+                <div id="rulesResult"></div>
+            </div>
+
+            <div class="card">
+                <h3>规则说明</h3>
+                <ul class="rules-list">
+                    <li>守军人数不能少于2人</li>
+                    <li>至少需要配置1个巡逻班次</li>
+                    <li>有检修占道时守军人数不能少于3人</li>
+                    <li>守军配置不得低于需求的50%</li>
+                    <li>守军人数不得低于城门最低配置要求</li>
+                    <li>排班方案存在冲突时不可执行</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="poolModal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <h3>调整资源总量</h3>
+        <form action="/defense-resources/pool/update" method="POST">
+            <input type="hidden" name="resource_type" id="modalResourceType">
+            <div class="form-group">
+                <label id="modalResourceLabel"></label>
+                <input type="number" name="total_quantity" id="modalQuantity" min="0" required>
+            </div>
+            <div class="form-actions">
+                <button type="button" onclick="closePoolModal()" class="btn btn-secondary">取消</button>
+                <button type="submit" class="btn btn-primary">保存</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentStartDate = "{{ start_date }}";
+let trendData = null;
+let comparisonData = null;
+
+function switchTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById(tabName).classList.add('active');
+
+    if (tabName === 'trend') loadTrendData();
+    if (tabName === 'comparison') loadComparisonData();
+    if (tabName === 'shifts') loadShifts();
+    if (tabName === 'gaps') loadGaps();
+    if (tabName === 'downgrade') loadDowngrades();
+    if (tabName === 'allocation') loadAllocations();
+    if (tabName === 'config') loadConfigList();
+}
+
+function changeDate() {
+    const date = document.getElementById('startDate').value;
+    window.location.href = `/defense-resources?start_date=${date}`;
+}
+
+async function runFullEvaluation() {
+    if (!confirm('确定要执行一周全量评估吗？这将生成值守排班、资源缺口、降级建议和调配方案。')) return;
+
+    try {
+        const result = await apiCall('/api/defense/full-evaluation', 'POST', { start_date: currentStartDate });
+        showToast(`评估完成：${result.summary.total_gates}个城门 × ${result.summary.total_days}天，发现${result.summary.open_gaps}个未解决缺口，生成${result.summary.total_allocations}个调配方案`, 'success');
+        loadAllData();
+    } catch (e) {
+        showToast('评估失败: ' + e.message, 'error');
+    }
+}
+
+async function loadRequirements() {
+    const gateId = document.getElementById('gateSelect').value;
+    const date = document.getElementById('configDate').value;
+    const period = document.getElementById('periodSelect').value;
+
+    try {
+        const [reqs, evalResult] = await Promise.all([
+            apiCall(`/api/defense/requirements?gate_id=${gateId}&date_str=${date}&time_period=${period}`),
+            apiCall(`/api/defense/evaluate?gate_id=${gateId}&date_str=${date}&time_period=${period}`)
+        ]);
+
+        const config = {
+            guard_count: parseInt(document.getElementById('guardCount').value),
+            patrol_shifts: parseInt(document.getElementById('patrolShifts').value),
+            light_supplies: parseInt(document.getElementById('lightSupplies').value),
+            repair_occupancy: parseInt(document.getElementById('repairOccupancy').value),
+            reserve_team: parseInt(document.getElementById('reserveTeam').value),
+        };
+
+        const sufficiencies = evalResult.sufficiencies || {};
+        const periodLabels = { morning_peak: '早高峰', daytime: '日间', evening_peak: '晚高峰', night: '夜间' };
+
+        let html = `
+            <div class="eval-summary">
+                <div class="eval-score ${evalResult.overall_score >= 80 ? 'score-good' : evalResult.overall_score >= 60 ? 'score-warning' : 'score-critical'}">
+                    综合评分: ${evalResult.overall_score}分
+                </div>
+                <div class="eval-status ${evalResult.can_execute ? 'status-ok' : 'status-error'}">
+                    ${evalResult.can_execute ? '✓ 方案可执行' : '✗ 存在不可执行规则'}
+                </div>
+            </div>
+            <table class="req-table">
+                <thead>
+                    <tr>
+                        <th>资源类型</th>
+                        <th>计算需求</th>
+                        <th>当前配置</th>
+                        <th>充足率</th>
+                        <th>状态</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>守军</td>
+                        <td>${reqs.guard} 人</td>
+                        <td>${config.guard_count} 人</td>
+                        <td>${(sufficiencies.guard * 100).toFixed(0)}%</td>
+                        <td>${sufficiencies.guard >= 1 ? '<span class="status-ok">充足</span>' : sufficiencies.guard >= 0.8 ? '<span class="status-warning">不足</span>' : '<span class="status-error">严重不足</span>'}</td>
+                    </tr>
+                    <tr>
+                        <td>巡逻</td>
+                        <td>${reqs.patrol} 班次</td>
+                        <td>${config.patrol_shifts} 班次</td>
+                        <td>${(sufficiencies.patrol * 100).toFixed(0)}%</td>
+                        <td>${sufficiencies.patrol >= 1 ? '<span class="status-ok">充足</span>' : sufficiencies.patrol >= 0.8 ? '<span class="status-warning">不足</span>' : '<span class="status-error">严重不足</span>'}</td>
+                    </tr>
+                    <tr>
+                        <td>灯火</td>
+                        <td>${reqs.light} 盏</td>
+                        <td>${config.light_supplies} 盏</td>
+                        <td>${(sufficiencies.light * 100).toFixed(0)}%</td>
+                        <td>${sufficiencies.light >= 1 ? '<span class="status-ok">充足</span>' : sufficiencies.light >= 0.8 ? '<span class="status-warning">不足</span>' : '<span class="status-error">严重不足</span>'}</td>
+                    </tr>
+                    <tr>
+                        <td>检修</td>
+                        <td>${reqs.repair} 组</td>
+                        <td>${config.repair_occupancy} 组</td>
+                        <td>${(sufficiencies.repair * 100).toFixed(0)}%</td>
+                        <td>${sufficiencies.repair >= 1 ? '<span class="status-ok">充足</span>' : sufficiencies.repair >= 0.8 ? '<span class="status-warning">不足</span>' : '<span class="status-error">严重不足</span>'}</td>
+                    </tr>
+                    <tr>
+                        <td>预备队</td>
+                        <td>${reqs.reserve} 人</td>
+                        <td>${config.reserve_team} 人</td>
+                        <td>${(sufficiencies.reserve * 100).toFixed(0)}%</td>
+                        <td>${sufficiencies.reserve >= 1 ? '<span class="status-ok">充足</span>' : sufficiencies.reserve >= 0.8 ? '<span class="status-warning">不足</span>' : '<span class="status-error">严重不足</span>'}</td>
+                    </tr>
+                </tbody>
+            </table>
+        `;
+
+        if (evalResult.non_executable_rules && evalResult.non_executable_rules.length > 0) {
+            html += `
+                <div class="rules-alert">
+                    <h4>不可执行规则：</h4>
+                    <ul>
+                        ${evalResult.non_executable_rules.map(r => `<li>${r}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        document.getElementById('requirementsContent').innerHTML = html;
+        document.getElementById('requirementsCard').style.display = 'block';
+    } catch (e) {
+        showToast('加载需求失败: ' + e.message, 'error');
+    }
+}
+
+async function loadConfigList() {
+    try {
+        const configs = await apiCall(`/api/defense/configs?date_str=${currentStartDate}`);
+        const periodLabels = { morning_peak: '早高峰', daytime: '日间', evening_peak: '晚高峰', night: '夜间' };
+
+        if (configs.length === 0) {
+            document.getElementById('configList').innerHTML = '<p class="empty-state">暂无配置数据</p>';
+            return;
+        }
+
+        let html = '<table class="data-table"><thead><tr><th>城门</th><th>时段</th><th>守军</th><th>巡逻</th><th>灯火</th><th>检修</th><th>预备队</th><th>操作</th></tr></thead><tbody>';
+        for (const cfg of configs) {
+            html += `
+                <tr>
+                    <td>${cfg.gate_name} (${cfg.gate_code})</td>
+                    <td>${periodLabels[cfg.time_period]}</td>
+                    <td>${cfg.guard_count}人</td>
+                    <td>${cfg.patrol_shifts}班/${cfg.patrol_interval}分</td>
+                    <td>${cfg.light_supplies}盏</td>
+                    <td>${cfg.repair_occupancy}组</td>
+                    <td>${cfg.reserve_team}人</td>
+                    <td>
+                        <button onclick="editConfig(${JSON.stringify(cfg).replace(/"/g, '&quot;')})" class="btn btn-small btn-info">编辑</button>
+                        <form action="/defense-resources/config/delete/${cfg.id}" method="POST" style="display:inline;" onsubmit="return confirm('确定删除?')">
+                            <button type="submit" class="btn btn-small btn-danger">删除</button>
+                        </form>
+                    </td>
+                </tr>
+            `;
+        }
+        html += '</tbody></table>';
+        document.getElementById('configList').innerHTML = html;
+    } catch (e) {
+        showToast('加载配置列表失败: ' + e.message, 'error');
+    }
+}
+
+function editConfig(cfg) {
+    document.getElementById('gateSelect').value = cfg.gate_id;
+    document.getElementById('configDate').value = cfg.config_date;
+    document.getElementById('periodSelect').value = cfg.time_period;
+    document.getElementById('guardCount').value = cfg.guard_count;
+    document.getElementById('patrolShifts').value = cfg.patrol_shifts;
+    document.getElementById('patrolInterval').value = cfg.patrol_interval;
+    document.getElementById('lightSupplies').value = cfg.light_supplies;
+    document.getElementById('repairOccupancy').value = cfg.repair_occupancy;
+    document.getElementById('reserveTeam').value = cfg.reserve_team;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    showToast('已填充配置数据，修改后点击保存', 'info');
+}
+
+async function loadTrendData() {
+    try {
+        trendData = await apiCall(`/api/defense/weekly-trend?start_date=${currentStartDate}`);
+        renderTrendChart();
+    } catch (e) {
+        showToast('加载趋势数据失败: ' + e.message, 'error');
+    }
+}
+
+function renderTrendChart() {
+    if (!trendData) return;
+
+    const metric = document.getElementById('trendMetric').value;
+    const metricLabels = {
+        overall_scores: '综合评分',
+        guard_counts: '守军人数',
+        patrol_shifts: '巡逻班次',
+        light_supplies: '灯火物资',
+        gap_counts: '缺口数量'
+    };
+
+    const traces = trendData.gates.map(gate => ({
+        x: trendData.dates,
+        y: gate[metric],
+        name: gate.gate_name,
+        type: 'scatter',
+        mode: 'lines+markers'
+    }));
+
+    const layout = {
+        title: `一周${metricLabels[metric]}趋势`,
+        xaxis: { title: '日期' },
+        yaxis: { title: metricLabels[metric] },
+        hovermode: 'closest'
+    };
+
+    Plotly.newPlot('trendChart', traces, layout, { responsive: true });
+}
+
+async function loadComparisonData() {
+    try {
+        comparisonData = await apiCall(`/api/defense/allocation-comparison?start_date=${currentStartDate}`);
+        renderComparisonChart();
+    } catch (e) {
+        showToast('加载对比数据失败: ' + e.message, 'error');
+    }
+}
+
+function renderComparisonChart() {
+    if (!comparisonData) return;
+
+    const gateIdx = parseInt(document.getElementById('comparisonGate').value);
+    const metric = document.getElementById('comparisonMetric').value;
+    const metricLabels = { guard: '守军人数', patrol: '巡逻班次', gap_count: '缺口数量' };
+    const gate = comparisonData.gates[gateIdx];
+
+    const traces = [
+        {
+            x: comparisonData.dates,
+            y: gate.before[metric],
+            name: '调配前',
+            type: 'bar',
+            marker: { color: '#e74c3c' }
+        },
+        {
+            x: comparisonData.dates,
+            y: gate.after[metric],
+            name: '调配后',
+            type: 'bar',
+            marker: { color: '#27ae60' }
+        }
+    ];
+
+    const layout = {
+        title: `${gate.gate_name} - 调配前后${metricLabels[metric]}对比`,
+        xaxis: { title: '日期' },
+        yaxis: { title: metricLabels[metric] },
+        barmode: 'group',
+        hovermode: 'closest'
+    };
+
+    Plotly.newPlot('comparisonChart', traces, layout, { responsive: true });
+
+    let totalBefore = gate.before[metric].reduce((a, b) => a + b, 0);
+    let totalAfter = gate.after[metric].reduce((a, b) => a + b, 0);
+    let change = totalBefore - totalAfter;
+    let pct = totalBefore > 0 ? (change / totalBefore * 100).toFixed(1) : 0;
+
+    document.getElementById('comparisonSummary').innerHTML = `
+        <div class="comparison-summary">
+            <div class="summary-item">
+                <span class="summary-label">调配前总计:</span>
+                <span class="summary-value">${totalBefore}</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">调配后总计:</span>
+                <span class="summary-value">${totalAfter}</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">变化量:</span>
+                <span class="summary-value ${change > 0 ? 'positive' : change < 0 ? 'negative' : ''}">
+                    ${change > 0 ? '↓' : change < 0 ? '↑' : ''}${Math.abs(change)} (${pct}%)
+                </span>
+            </div>
+        </div>
+    `;
+}
+
+async function loadShifts() {
+    try {
+        const shifts = await apiCall(`/api/defense/shifts?date_str=${currentStartDate}`);
+        const shiftLabels = { morning: '早班', midday: '中班', evening: '晚班', night: '夜班' };
+        const statusLabels = { scheduled: '已排定', confirmed: '已确认', completed: '已完成', cancelled: '已取消' };
+
+        if (shifts.length === 0) {
+            document.getElementById('shiftsList').innerHTML = '<p class="empty-state">暂无排班数据，请先执行全量评估</p>';
+            return;
+        }
+
+        let html = '<div class="shifts-grid">';
+        for (const gate of {{ gates|tojson }}) {
+            const gateShifts = shifts.filter(s => s.gate_id === gate.id);
+            html += `
+                <div class="shift-card">
+                    <h4>${gate.gate_name}</h4>
+                    <table class="data-table">
+                        <thead><tr><th>班次</th><th>时间</th><th>守军</th><th>状态</th></tr></thead>
+                        <tbody>
+            `;
+            for (const shift of gateShifts) {
+                html += `
+                    <tr>
+                        <td>${shiftLabels[shift.shift_type]}</td>
+                        <td>${shift.start_time} - ${shift.end_time}</td>
+                        <td>${shift.guard_count}人</td>
+                        <td><span class="status-badge status-${shift.status}">${statusLabels[shift.status]}</span></td>
+                    </tr>
+                `;
+            }
+            if (gateShifts.length === 0) {
+                html += '<tr><td colspan="4" class="empty-state">暂无排班</td></tr>';
+            }
+            html += '</tbody></table></div>';
+        }
+        html += '</div>';
+        document.getElementById('shiftsList').innerHTML = html;
+    } catch (e) {
+        showToast('加载排班失败: ' + e.message, 'error');
+    }
+}
+
+async function loadGaps() {
+    try {
+        const status = document.getElementById('gapStatusFilter').value;
+        let url = `/api/defense/gaps?date_str=${currentStartDate}`;
+        if (status) url += `&status=${status}`;
+        const gaps = await apiCall(url);
+
+        const severityLabels = { info: '提示', warning: '警告', critical: '严重' };
+        const statusLabels = { open: '未解决', resolved: '已解决', ignored: '已忽略' };
+
+        if (gaps.length === 0) {
+            document.getElementById('gapsList').innerHTML = '<p class="empty-state">暂无资源缺口</p>';
+            return;
+        }
+
+        let html = '<div class="gaps-grid">';
+        for (const gap of gaps) {
+            html += `
+                <div class="gap-card severity-${gap.severity}">
+                    <div class="gap-header">
+                        <span class="gap-gate">${gap.gate_name}</span>
+                        <span class="gap-period">${gap.period_label}</span>
+                        <span class="gap-severity">${severityLabels[gap.severity]}</span>
+                    </div>
+                    <div class="gap-body">
+                        <div class="gap-type">${gap.resource_label}资源缺口</div>
+                        <div class="gap-detail">需求: ${gap.required_quantity} / 可用: ${gap.available_quantity} / 缺口: <strong>${gap.gap_quantity}</strong></div>
+                        <div class="gap-desc">${gap.description}</div>
+                    </div>
+                    <div class="gap-footer">
+                        <span class="status-badge status-${gap.status}">${statusLabels[gap.status]}</span>
+                        ${gap.status === 'open' ? `
+                            <button onclick="updateGapStatus(${gap.id}, 'resolved')" class="btn btn-small btn-success">标记解决</button>
+                            <button onclick="updateGapStatus(${gap.id}, 'ignored')" class="btn btn-small btn-secondary">忽略</button>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+        document.getElementById('gapsList').innerHTML = html;
+    } catch (e) {
+        showToast('加载缺口失败: ' + e.message, 'error');
+    }
+}
+
+async function updateGapStatus(id, status) {
+    try {
+        await apiCall(`/api/defense/gaps/${id}/status`, 'POST', { status });
+        showToast('状态已更新', 'success');
+        loadGaps();
+    } catch (e) {
+        showToast('更新失败: ' + e.message, 'error');
+    }
+}
+
+async function loadDowngrades() {
+    try {
+        const status = document.getElementById('downgradeStatusFilter').value;
+        let url = `/api/defense/downgrades?date_str=${currentStartDate}`;
+        if (status) url += `&status=${status}`;
+        const suggestions = await apiCall(url);
+
+        const levelLabels = { minimal: '最低', reduced: '降低', normal: '正常', enhanced: '加强', maximum: '最高' };
+        const statusLabels = { pending: '待处理', approved: '已批准', rejected: '已拒绝', implemented: '已实施' };
+
+        if (suggestions.length === 0) {
+            document.getElementById('downgradesList').innerHTML = '<p class="empty-state">暂无降级建议</p>';
+            return;
+        }
+
+        let html = '<table class="data-table"><thead><tr><th>城门</th><th>时段</th><th>当前等级</th><th>建议等级</th><th>预计节省</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+        for (const s of suggestions) {
+            html += `
+                <tr>
+                    <td>${s.gate_name}</td>
+                    <td>${s.period_label}</td>
+                    <td><span class="level-badge level-${s.current_level}">${levelLabels[s.current_level]}</span></td>
+                    <td><span class="level-badge level-${s.suggested_level}">${levelLabels[s.suggested_level]}</span></td>
+                    <td>守军${s.expected_guard_saving}人 / 巡逻${s.expected_patrol_saving}班</td>
+                    <td><span class="status-badge status-${s.status}">${statusLabels[s.status]}</span></td>
+                    <td>
+                        ${s.status === 'pending' ? `
+                            <button onclick="updateDowngradeStatus(${s.id}, 'approved')" class="btn btn-small btn-success">批准</button>
+                            <button onclick="updateDowngradeStatus(${s.id}, 'rejected')" class="btn btn-small btn-danger">拒绝</button>
+                        ` : s.status === 'approved' ? `
+                            <button onclick="updateDowngradeStatus(${s.id}, 'implemented')" class="btn btn-small btn-primary">标记实施</button>
+                        ` : ''}
+                    </td>
+                </tr>
+                <tr>
+                    <td colspan="7" class="detail-row">
+                        <strong>原因：</strong>${s.reason}<br>
+                        <strong>影响评估：</strong>${s.impact_assessment || '无'}
+                    </td>
+                </tr>
+            `;
+        }
+        html += '</tbody></table>';
+        document.getElementById('downgradesList').innerHTML = html;
+    } catch (e) {
+        showToast('加载降级建议失败: ' + e.message, 'error');
+    }
+}
+
+async function updateDowngradeStatus(id, status) {
+    try {
+        await apiCall(`/api/defense/downgrades/${id}/status`, 'POST', { status });
+        showToast('状态已更新', 'success');
+        loadDowngrades();
+    } catch (e) {
+        showToast('更新失败: ' + e.message, 'error');
+    }
+}
+
+async function loadAllocations() {
+    try {
+        const status = document.getElementById('allocationStatusFilter').value;
+        let url = `/api/defense/allocations?date_str=${currentStartDate}`;
+        if (status) url += `&status=${status}`;
+        const allocations = await apiCall(url);
+
+        const statusLabels = { proposed: '建议中', approved: '已批准', in_progress: '执行中', completed: '已完成', cancelled: '已取消' };
+
+        if (allocations.length === 0) {
+            document.getElementById('allocationsList').innerHTML = '<p class="empty-state">暂无跨门调配方案</p>';
+            return;
+        }
+
+        let html = '<div class="allocations-grid">';
+        for (const alloc of allocations) {
+            html += `
+                <div class="allocation-card status-${alloc.status}">
+                    <div class="allocation-header">
+                        <span class="allocation-period">${alloc.period_label || ''}</span>
+                        <span class="status-badge status-${alloc.status}">${statusLabels[alloc.status]}</span>
+                    </div>
+                    <div class="allocation-body">
+                        <div class="allocation-flow">
+                            <span class="gate-from">${alloc.from_gate_name}</span>
+                            <span class="arrow">→</span>
+                            <span class="gate-to">${alloc.to_gate_name}</span>
+                        </div>
+                        <div class="allocation-detail">
+                            调配 <strong>${alloc.transfer_quantity}</strong> ${alloc.resource_label}
+                        </div>
+                        <div class="allocation-time">
+                            ${alloc.start_time} - ${alloc.end_time}
+                        </div>
+                        <div class="allocation-reason">${alloc.reason || ''}</div>
+                    </div>
+                    <div class="allocation-footer">
+                        ${alloc.status === 'proposed' ? `
+                            <button onclick="updateAllocationStatus(${alloc.id}, 'approved')" class="btn btn-small btn-success">批准</button>
+                            <button onclick="updateAllocationStatus(${alloc.id}, 'cancelled')" class="btn btn-small btn-danger">取消</button>
+                        ` : alloc.status === 'approved' ? `
+                            <button onclick="updateAllocationStatus(${alloc.id}, 'in_progress')" class="btn btn-small btn-primary">开始执行</button>
+                            <button onclick="updateAllocationStatus(${alloc.id}, 'cancelled')" class="btn btn-small btn-danger">取消</button>
+                        ` : alloc.status === 'in_progress' ? `
+                            <button onclick="updateAllocationStatus(${alloc.id}, 'completed')" class="btn btn-small btn-success">标记完成</button>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+        html += '</div>';
+        document.getElementById('allocationsList').innerHTML = html;
+    } catch (e) {
+        showToast('加载调配方案失败: ' + e.message, 'error');
+    }
+}
+
+async function updateAllocationStatus(id, status) {
+    try {
+        await apiCall(`/api/defense/allocations/${id}/status`, 'POST', { status });
+        showToast('状态已更新', 'success');
+        loadAllocations();
+    } catch (e) {
+        showToast('更新失败: ' + e.message, 'error');
+    }
+}
+
+async function checkRules() {
+    const gateId = document.getElementById('ruleGateSelect').value;
+    const date = document.getElementById('ruleDate').value;
+    const period = document.getElementById('rulePeriodSelect').value;
+
+    try {
+        const result = await apiCall(`/api/defense/non-executable?gate_id=${gateId}&date_str=${date}&time_period=${period}`);
+
+        let html = '';
+        if (result.can_execute) {
+            html = '<div class="rules-success"><strong>✓ 所有规则检查通过，方案可执行</strong></div>';
+        } else {
+            html = `
+                <div class="rules-fail">
+                    <strong>✗ 发现 ${result.rules.length} 条不可执行规则：</strong>
+                    <ul>
+                        ${result.rules.map(r => `<li>${r}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+        document.getElementById('rulesResult').innerHTML = html;
+    } catch (e) {
+        showToast('检查规则失败: ' + e.message, 'error');
+    }
+}
+
+function editPool(resourceType, currentQty) {
+    const labels = { guard: '守军总数(人)', patrol: '巡逻队总数(队)', light: '灯火物资总数(盏)', repair: '检修班组总数(组)', reserve: '应急预备队总数(人)' };
+    document.getElementById('modalResourceType').value = resourceType;
+    document.getElementById('modalResourceLabel').textContent = labels[resourceType];
+    document.getElementById('modalQuantity').value = currentQty;
+    document.getElementById('poolModal').style.display = 'block';
+}
+
+function closePoolModal() {
+    document.getElementById('poolModal').style.display = 'none';
+}
+
+async function loadAllData() {
+    loadConfigList();
+    if (trendData) loadTrendData();
+    if (comparisonData) loadComparisonData();
+    loadShifts();
+    loadGaps();
+    loadDowngrades();
+    loadAllocations();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    loadConfigList();
+});
+</script>
+{% endblock %}
