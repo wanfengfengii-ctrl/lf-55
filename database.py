@@ -382,5 +382,97 @@ def init_db():
     except Exception:
         pass
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS public_opinion_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_code TEXT UNIQUE NOT NULL,
+            gate_id INTEGER NOT NULL,
+            event_date TEXT NOT NULL,
+            time_period TEXT NOT NULL CHECK(time_period IN ('early_morning','morning_peak','daytime','evening_peak','night','late_night')),
+            event_type TEXT NOT NULL CHECK(event_type IN ('vendor_gathering','people_petition','patrol_anomaly','road_blockage','fire_rumor','other')),
+            event_level TEXT NOT NULL CHECK(event_level IN ('minor','moderate','serious','critical')),
+            credibility INTEGER NOT NULL DEFAULT 50 CHECK(credibility BETWEEN 0 AND 100),
+            handle_deadline TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            reporter TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'reported' CHECK(status IN ('reported','responding','handling','resolved','closed')),
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS public_opinion_notice_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_name TEXT NOT NULL,
+            event_type TEXT NOT NULL CHECK(event_type IN ('vendor_gathering','people_petition','patrol_anomaly','road_blockage','fire_rumor','other')),
+            event_level TEXT NOT NULL CHECK(event_level IN ('minor','moderate','serious','critical')),
+            template_content TEXT NOT NULL,
+            announce_position TEXT DEFAULT 'gate_top',
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS public_opinion_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            response_type TEXT NOT NULL CHECK(response_type IN ('temp_response','gate_notice','resource_support','schedule_adjust')),
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 5,
+            status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','approved','executed','rejected')),
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (event_id) REFERENCES public_opinion_events(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS public_opinion_progress (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            progress_type TEXT NOT NULL CHECK(progress_type IN ('report','assign','handle','update','resolve','close')),
+            title TEXT NOT NULL,
+            content TEXT DEFAULT '',
+            operator TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (event_id) REFERENCES public_opinion_events(id) ON DELETE CASCADE
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS public_opinion_gate_notices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL,
+            gate_id INTEGER NOT NULL,
+            template_id INTEGER,
+            notice_title TEXT NOT NULL,
+            notice_content TEXT NOT NULL,
+            display_position TEXT DEFAULT 'gate_top',
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','expired','cancelled')),
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (event_id) REFERENCES public_opinion_events(id) ON DELETE CASCADE,
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            FOREIGN KEY (template_id) REFERENCES public_opinion_notice_templates(id) ON DELETE SET NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_po_events_date ON public_opinion_events(event_date)
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_po_events_gate ON public_opinion_events(gate_id)
+    """)
+
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_po_events_status ON public_opinion_events(status)
+    """)
+
     conn.commit()
     conn.close()

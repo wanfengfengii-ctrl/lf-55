@@ -2356,3 +2356,899 @@ def full_defense_evaluation(start_date: str) -> dict:
             "avg_score": int(sum(e["overall_score"] for e in all_evaluations) / len(all_evaluations)) if all_evaluations else 0,
         },
     }
+
+
+_EVENT_TYPE_LABELS = {
+    "vendor_gathering": "商贩聚集",
+    "people_petition": "百姓请愿",
+    "patrol_anomaly": "夜巡异常",
+    "road_blockage": "道路阻塞",
+    "fire_rumor": "失火传闻",
+    "other": "其他事件",
+}
+
+_EVENT_LEVEL_LABELS = {
+    "minor": "一般",
+    "moderate": "较重",
+    "serious": "严重",
+    "critical": "重大",
+}
+
+_TIME_PERIOD_LABELS = {
+    "early_morning": "凌晨",
+    "morning_peak": "早高峰",
+    "daytime": "日间",
+    "evening_peak": "晚高峰",
+    "night": "夜间",
+    "late_night": "深夜",
+}
+
+_STATUS_LABELS = {
+    "reported": "已上报",
+    "responding": "响应中",
+    "handling": "处置中",
+    "resolved": "已解决",
+    "closed": "已结案",
+}
+
+
+def _generate_event_code() -> str:
+    now = datetime.now()
+    conn = get_db()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM public_opinion_events WHERE date(created_at) = date('now')"
+    ).fetchone()[0]
+    conn.close()
+    return f"MQ{now.strftime('%Y%m%d')}{count + 1:04d}"
+
+
+def get_all_opinion_events(gate_id: int = None, start_date: str = None, end_date: str = None,
+                           status: str = None, event_type: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT poe.*, g.gate_name, g.gate_code 
+               FROM public_opinion_events poe 
+               JOIN gates g ON poe.gate_id = g.id 
+               WHERE 1=1"""
+    params = []
+    if gate_id:
+        query += " AND poe.gate_id = ?"
+        params.append(gate_id)
+    if start_date:
+        query += " AND poe.event_date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND poe.event_date <= ?"
+        params.append(end_date)
+    if status:
+        query += " AND poe.status = ?"
+        params.append(status)
+    if event_type:
+        query += " AND poe.event_type = ?"
+        params.append(event_type)
+    query += " ORDER BY poe.event_date DESC, poe.created_at DESC"
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["event_type_label"] = _EVENT_TYPE_LABELS.get(d["event_type"], d["event_type"])
+        d["event_level_label"] = _EVENT_LEVEL_LABELS.get(d["event_level"], d["event_level"])
+        d["time_period_label"] = _TIME_PERIOD_LABELS.get(d["time_period"], d["time_period"])
+        d["status_label"] = _STATUS_LABELS.get(d["status"], d["status"])
+        result.append(d)
+    conn.close()
+    return result
+
+
+def get_opinion_event(event_id: int) -> Optional[dict]:
+    conn = get_db()
+    row = conn.execute(
+        """SELECT poe.*, g.gate_name, g.gate_code 
+           FROM public_opinion_events poe 
+           JOIN gates g ON poe.gate_id = g.id 
+           WHERE poe.id = ?""",
+        (event_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    d = dict(row)
+    d["event_type_label"] = _EVENT_TYPE_LABELS.get(d["event_type"], d["event_type"])
+    d["event_level_label"] = _EVENT_LEVEL_LABELS.get(d["event_level"], d["event_level"])
+    d["time_period_label"] = _TIME_PERIOD_LABELS.get(d["time_period"], d["time_period"])
+    d["status_label"] = _STATUS_LABELS.get(d["status"], d["status"])
+    conn.close()
+    return d
+
+
+def create_opinion_event(gate_id: int, event_date: str, time_period: str, event_type: str,
+                         event_level: str, credibility: int, handle_deadline: str,
+                         title: str, description: str = "", reporter: str = "") -> dict:
+    conn = get_db()
+    try:
+        gate = conn.execute("SELECT * FROM gates WHERE id = ?", (gate_id,)).fetchone()
+        if not gate:
+            return {"success": False, "error": "城门不存在"}
+        event_code = _generate_event_code()
+        cursor = conn.execute(
+            """INSERT INTO public_opinion_events 
+               (event_code, gate_id, event_date, time_period, event_type, event_level, 
+                credibility, handle_deadline, title, description, reporter, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?, 'reported')""",
+            (event_code, gate_id, event_date, time_period, event_type, event_level,
+             credibility, handle_deadline, title, description, reporter),
+        )
+        event_id = cursor.lastrowid
+        conn.execute(
+            """INSERT INTO public_opinion_progress 
+               (event_id, progress_type, title, content, operator)
+               VALUES (?, 'report', '事件上报', ?, ?)""",
+            (event_id, description or title, reporter or "系统"),
+        )
+        conn.commit()
+        _generate_auto_responses(event_id)
+        return {"success": True, "event_id": event_id, "event_code": event_code}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def update_opinion_event_status(event_id: int, status: str, operator: str = "", note: str = "") -> dict:
+    conn = get_db()
+    try:
+        event = conn.execute("SELECT * FROM public_opinion_events WHERE id = ?", (event_id,)).fetchone()
+        if not event:
+            return {"success": False, "error": "事件不存在"}
+        conn.execute(
+            "UPDATE public_opinion_events SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, event_id),
+        )
+        progress_type_map = {
+            "responding": "assign",
+            "handling": "handle",
+            "resolved": "resolve",
+            "closed": "close",
+        }
+        progress_type = progress_type_map.get(status, "update")
+        status_label = _STATUS_LABELS.get(status, status)
+        conn.execute(
+            """INSERT INTO public_opinion_progress 
+               (event_id, progress_type, title, content, operator)
+               VALUES (?,?,?,?,?)""",
+            (event_id, progress_type, f"状态变更为{status_label}", note or f"状态变更为{status_label}", operator or "系统"),
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def add_event_progress(event_id: int, progress_type: str, title: str,
+                       content: str = "", operator: str = "") -> dict:
+    conn = get_db()
+    try:
+        event = conn.execute("SELECT * FROM public_opinion_events WHERE id = ?", (event_id,)).fetchone()
+        if not event:
+            return {"success": False, "error": "事件不存在"}
+        conn.execute(
+            """INSERT INTO public_opinion_progress 
+               (event_id, progress_type, title, content, operator)
+               VALUES (?,?,?,?,?)""",
+            (event_id, progress_type, title, content, operator),
+        )
+        conn.execute(
+            "UPDATE public_opinion_events SET updated_at = datetime('now') WHERE id = ?",
+            (event_id,),
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_event_progress(event_id: int) -> list[dict]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM public_opinion_progress WHERE event_id = ? ORDER BY created_at ASC",
+        (event_id,),
+    ).fetchall()
+    result = [dict(r) for r in rows]
+    conn.close()
+    return result
+
+
+def _generate_auto_responses(event_id: int):
+    conn = get_db()
+    try:
+        event = conn.execute(
+            """SELECT poe.*, g.gate_name, g.gate_code 
+               FROM public_opinion_events poe 
+               JOIN gates g ON poe.gate_id = g.id 
+               WHERE poe.id = ?""",
+            (event_id,),
+        ).fetchone()
+        if not event:
+            return
+        event = dict(event)
+
+        temp_resp = _generate_temp_response(event)
+        conn.execute(
+            """INSERT INTO public_opinion_responses 
+               (event_id, response_type, title, content, priority, status)
+               VALUES (?, 'temp_response', ?, ?, ?, 'proposed')""",
+            (event_id, temp_resp["title"], temp_resp["content"], temp_resp["priority"]),
+        )
+
+        gate_notice = _generate_gate_notice(event)
+        conn.execute(
+            """INSERT INTO public_opinion_responses 
+               (event_id, response_type, title, content, priority, status)
+               VALUES (?, 'gate_notice', ?, ?, ?, 'proposed')""",
+            (event_id, gate_notice["title"], gate_notice["content"], gate_notice["priority"]),
+        )
+
+        resource_support = _generate_resource_support(event)
+        conn.execute(
+            """INSERT INTO public_opinion_responses 
+               (event_id, response_type, title, content, priority, status)
+               VALUES (?, 'resource_support', ?, ?, ?, 'proposed')""",
+            (event_id, resource_support["title"], resource_support["content"], resource_support["priority"]),
+        )
+
+        schedule_adjust = _generate_schedule_adjust(event)
+        conn.execute(
+            """INSERT INTO public_opinion_responses 
+               (event_id, response_type, title, content, priority, status)
+               VALUES (?, 'schedule_adjust', ?, ?, ?, 'proposed')""",
+            (event_id, schedule_adjust["title"], schedule_adjust["content"], schedule_adjust["priority"]),
+        )
+
+        _create_gate_notice_from_event(event, gate_notice)
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"生成自动响应失败: {e}")
+    finally:
+        conn.close()
+
+
+def _generate_temp_response(event: dict) -> dict:
+    event_type = event["event_type"]
+    event_level = event["event_level"]
+    gate_name = event["gate_name"]
+    time_period = _TIME_PERIOD_LABELS.get(event["time_period"], event["time_period"])
+
+    level_weight = {"minor": 1, "moderate": 2, "serious": 3, "critical": 4}
+    weight = level_weight.get(event_level, 1)
+
+    responses = {
+        "vendor_gathering": {
+            "title": "商贩聚集临时响应建议",
+            "content": f"""
+【响应等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【涉及城门】：{gate_name}
+【事发时段】：{time_period}
+【建议措施】：
+1. 增派 {weight * 2} 名城防队员前往现场维持秩序
+2. 安排 {weight} 名巡检人员疏导商贩至指定区域
+3. 开启城门侧通道，避免主通道拥堵
+4. 设置临时警示标识，引导行人绕行
+5. 每 {max(30 // weight, 15)} 分钟上报一次现场情况
+【预计影响】：城门通行效率下降约 {weight * 10}%，建议错峰出行
+【处置时限】：{event['handle_deadline']}
+            """.strip(),
+            "priority": weight * 2,
+        },
+        "people_petition": {
+            "title": "百姓请愿临时响应建议",
+            "content": f"""
+【响应等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【涉及城门】：{gate_name}
+【事发时段】：{time_period}
+【建议措施】：
+1. 立即启动 {weight + 1} 级响应机制，增派 {weight * 3} 名守卫
+2. 安排主事官员前往现场接访，安抚民众情绪
+3. 临时关闭城门侧门，保留主通道供人员通行
+4. 设置隔离带，防止人群冲击城门
+5. 通知周边城门做好联动准备
+【预计影响】：城门安全等级提升，通行速度放缓
+【处置时限】：{event['handle_deadline']}
+            """.strip(),
+            "priority": weight * 3,
+        },
+        "patrol_anomaly": {
+            "title": "夜巡异常临时响应建议",
+            "content": f"""
+【响应等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【涉及城门】：{gate_name}
+【事发时段】：{time_period}
+【建议措施】：
+1. 增派 {weight * 2} 组夜巡小队前往异常区域
+2. 加强城门附近照明，开启全部探照灯
+3. 调阅周边监控录像，排查异常原因
+4. 通知相邻城门提高警惕，加强戒备
+5. 每 {max(20 // weight, 10)} 分钟汇报一次巡查进展
+【预计影响】：夜巡密度增加，城门警戒等级临时提升
+【处置时限】：{event['handle_deadline']}
+            """.strip(),
+            "priority": weight * 2,
+        },
+        "road_blockage": {
+            "title": "道路阻塞临时响应建议",
+            "content": f"""
+【响应等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【涉及城门】：{gate_name}
+【事发时段】：{time_period}
+【建议措施】：
+1. 立即派遣 {weight * 2} 名交通疏导员前往现场
+2. 临时开放备用通道，分流过往行人车辆
+3. 在城门内外设置分流指示牌
+4. 协调相关部门清理障碍物
+5. 预计 {weight} 小时内恢复正常通行
+【预计影响】：城门通行能力下降 {weight * 20}%，请绕行其他城门
+【处置时限】：{event['handle_deadline']}
+            """.strip(),
+            "priority": weight * 2,
+        },
+        "fire_rumor": {
+            "title": "失火传闻临时响应建议",
+            "content": f"""
+【响应等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【涉及城门】：{gate_name}
+【事发时段】：{time_period}
+【建议措施】：
+1. 立即派遣 {weight} 组火政人员前往核实火情
+2. 通知城门守卫做好疏散准备
+3. 预备灭火器材，检查消防设施
+4. 如火情属实，立即开启全部城门通道便于疏散
+5. 通过城防广播及时通报情况，避免恐慌
+【预计影响】：可能造成短时恐慌，需做好舆情引导
+【处置时限】：{event['handle_deadline']}
+            """.strip(),
+            "priority": weight * 3,
+        },
+        "other": {
+            "title": "其他民情事件临时响应建议",
+            "content": f"""
+【响应等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【涉及城门】：{gate_name}
+【事发时段】：{time_period}
+【建议措施】：
+1. 派遣 {weight} 名城防队员前往现场了解情况
+2. 及时上报事件进展，保持通讯畅通
+3. 根据现场情况调整响应策略
+4. 做好记录，为后续处置提供依据
+【处置时限】：{event['handle_deadline']}
+            """.strip(),
+            "priority": weight,
+        },
+    }
+    return responses.get(event_type, responses["other"])
+
+
+def _generate_gate_notice(event: dict) -> dict:
+    event_type = event["event_type"]
+    event_level = event["event_level"]
+    gate_name = event["gate_name"]
+    time_period = _TIME_PERIOD_LABELS.get(event["time_period"], event["time_period"])
+
+    notices = {
+        "vendor_gathering": {
+            "title": f"{gate_name}商贩聚集告示",
+            "content": f"【{gate_name}告示】因{time_period}时段城门外商贩聚集，往来行人请留意脚下，注意安全。城防人员正在现场疏导秩序，请配合管理，有序通行。",
+            "priority": 3,
+        },
+        "people_petition": {
+            "title": f"{gate_name}通行提示",
+            "content": f"【{gate_name}告示】城门附近有民众聚集陈情，城防部门正在妥善处理。请过往行人配合指引，绕行侧门通行，勿在城门附近逗留。感谢配合。",
+            "priority": 5,
+        },
+        "patrol_anomaly": {
+            "title": f"{gate_name}安全提示",
+            "content": f"【{gate_name}告示】近日{time_period}时段巡查发现异常情况，城防部门已加强巡逻。请市民提高警惕，如发现可疑人员或情况，及时向城门守卫报告。",
+            "priority": 4,
+        },
+        "road_blockage": {
+            "title": f"{gate_name}道路通行提示",
+            "content": f"【{gate_name}告示】因前方道路临时阻塞，{time_period}时段城门通行可能受阻。建议市民错峰出行或绕行其他城门。不便之处，敬请谅解。",
+            "priority": 3,
+        },
+        "fire_rumor": {
+            "title": f"{gate_name}安全告示",
+            "content": f"【{gate_name}告示】近日有失火传闻，城防部门正在核实。请市民勿信谣传谣，关注官方通报。如遇火情，请保持冷静，听从城防人员指挥疏散。",
+            "priority": 5,
+        },
+        "other": {
+            "title": f"{gate_name}临时通知",
+            "content": f"【{gate_name}告示】近日城门周边情况特殊，请过往行人注意安全，配合城防人员管理。如有疑问，可向城门守卫咨询。",
+            "priority": 2,
+        },
+    }
+    return notices.get(event_type, notices["other"])
+
+
+def _generate_resource_support(event: dict) -> dict:
+    event_type = event["event_type"]
+    event_level = event["event_level"]
+    gate_name = event["gate_name"]
+    gate_id = event["gate_id"]
+    event_date = event["event_date"]
+    time_period = event["time_period"]
+
+    level_map = {"minor": 1, "moderate": 2, "serious": 3, "critical": 4}
+    level = level_map.get(event_level, 1)
+
+    resource_req = calculate_resource_requirements(gate_id, event_date, "daytime") or {}
+    current_config = get_resource_config(gate_id, event_date, "daytime") or {}
+
+    extra_guards = level * 2
+    extra_patrol = level
+    extra_reserve = level if level >= 2 else 0
+
+    pools = get_resource_pools() or []
+    pool_info = {}
+    for p in pools:
+        pool_info[p["resource_type"]] = {
+            "total": p["total_quantity"],
+            "allocated": p["allocated_quantity"],
+            "available": p["total_quantity"] - p["allocated_quantity"],
+        }
+
+    guard_avail = pool_info.get("guard", {}).get("available", 0)
+    patrol_avail = pool_info.get("patrol", {}).get("available", 0)
+    reserve_avail = pool_info.get("reserve", {}).get("available", 0)
+
+    cur_guard = current_config.get('guard_count', 0) if current_config else 0
+    cur_patrol = current_config.get('patrol_shifts', 0) if current_config else 0
+
+    content = f"""
+【增援城门】：{gate_name}
+【事件等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【事发时段】：{_TIME_PERIOD_LABELS.get(time_period, time_period)}
+
+【建议增援配置】：
+- 守卫人员：+{extra_guards} 人（建议从预备队抽调）
+- 巡逻班次：+{extra_patrol} 组（加强周边巡查）
+- 预备队：+{extra_reserve} 组（待命支援）
+
+【现有资源】：
+- 当前守卫配置：{cur_guard} 人
+- 当前巡逻配置：{cur_patrol} 组
+
+【资源池状态】：
+- 守卫可用：{guard_avail} 人 {"✅ 充足" if guard_avail >= extra_guards else "⚠️ 不足"}
+- 巡逻可用：{patrol_avail} 组 {"✅ 充足" if patrol_avail >= extra_patrol else "⚠️ 不足"}
+- 预备队可用：{reserve_avail} 组 {"✅ 充足" if reserve_avail >= extra_reserve else "⚠️ 不足"}
+
+【建议调派来源】：
+1. 从资源池预备队优先调派
+2. 如资源不足，可从邻近低负荷城门临时调配
+3. 重大事件建议启动跨城门支援机制
+    """.strip()
+
+    return {
+        "title": f"{gate_name}资源增援建议",
+        "content": content,
+        "priority": level * 2,
+    }
+
+
+def _generate_schedule_adjust(event: dict) -> dict:
+    event_type = event["event_type"]
+    event_level = event["event_level"]
+    gate_name = event["gate_name"]
+    gate_id = event["gate_id"]
+    event_date = event["event_date"]
+    time_period = event["time_period"]
+
+    level_map = {"minor": 1, "moderate": 2, "serious": 3, "critical": 4}
+    level = level_map.get(event_level, 1)
+
+    conn = get_db()
+    schedule = conn.execute(
+        """SELECT * FROM schedules WHERE gate_id = ? AND schedule_date = ? AND scheme_type = 'final'""",
+        (gate_id, event_date),
+    ).fetchone()
+    daily_alert = get_alert_for_date(event_date)
+    temp_controls = get_active_temp_controls_for_gate(gate_id, event_date)
+
+    adjustments = []
+    impact_level = "低"
+
+    if level >= 1:
+        adjustments.append(f"建议在{_TIME_PERIOD_LABELS.get(time_period, time_period)}时段加强城门值守力量")
+    if level >= 2:
+        adjustments.append("建议临时增开一条检查通道，加快通行速度")
+        impact_level = "中"
+    if level >= 3:
+        adjustments.append("建议启动联动机制，通知相邻城门做好分流准备")
+        impact_level = "高"
+    if level >= 4:
+        adjustments.append("建议提升警戒等级，考虑提前关闭或延迟开启城门")
+        impact_level = "严重"
+
+    open_time = schedule["open_time"] if schedule else "未知"
+    close_time = schedule["close_time"] if schedule else "未知"
+
+    content = f"""
+【涉及城门】：{gate_name}
+【事件等级】：{_EVENT_LEVEL_LABELS.get(event_level, '一般')}
+【影响日期】：{event_date}
+【影响时段】：{_TIME_PERIOD_LABELS.get(time_period, time_period)}
+【影响程度】：{impact_level}
+
+【当日排班】：
+- 计划开门：{open_time}
+- 计划关门：{close_time}
+- 当前警戒：{daily_alert['level_name'] if daily_alert else '和平'}级
+
+【排班调整建议】：
+{chr(10).join(f'{i+1}. {a}' for i, a in enumerate(adjustments))}
+
+【临时管制影响】：
+- 当前生效管制令：{len(temp_controls)} 条
+- 管制优先级：{max([tc['priority'] for tc in temp_controls], default='无')}
+
+【注意事项】：
+1. 调整排班需综合考虑当日时令、节庆、警戒等因素
+2. 如调整关门时间，需确保不与宵禁规则冲突
+3. 重大调整建议上报审批后执行
+    """.strip()
+
+    conn.close()
+
+    return {
+        "title": f"{gate_name}排班调整影响分析",
+        "content": content,
+        "priority": level * 2,
+    }
+
+
+def _create_gate_notice_from_event(event: dict, notice_info: dict):
+    conn = get_db()
+    try:
+        event_date = event["event_date"]
+        start_time = f"{event_date} 00:00:00"
+        end_time = f"{event_date} 23:59:59"
+
+        conn.execute(
+            """INSERT INTO public_opinion_gate_notices 
+               (event_id, gate_id, notice_title, notice_content, display_position, 
+                start_time, end_time, status)
+               VALUES (?,?,?,?,?, ?, ?, 'draft')""",
+            (event["id"], event["gate_id"], notice_info["title"], notice_info["content"],
+             "gate_top", start_time, end_time),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"创建城门通告失败: {e}")
+    finally:
+        conn.close()
+
+
+def get_event_responses(event_id: int) -> list[dict]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM public_opinion_responses WHERE event_id = ? ORDER BY priority DESC, created_at ASC",
+        (event_id,),
+    ).fetchall()
+    result = []
+    type_labels = {
+        "temp_response": "临时响应建议",
+        "gate_notice": "城门通告方案",
+        "resource_support": "资源增援建议",
+        "schedule_adjust": "排班调整影响",
+    }
+    for row in rows:
+        d = dict(row)
+        d["response_type_label"] = type_labels.get(d["response_type"], d["response_type"])
+        result.append(d)
+    conn.close()
+    return result
+
+
+def update_response_status(response_id: int, status: str) -> dict:
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE public_opinion_responses SET status = ? WHERE id = ?",
+            (status, response_id),
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_gate_notices(gate_id: int = None, event_id: int = None, status: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT ogn.*, g.gate_name, g.gate_code, poe.title as event_title 
+               FROM public_opinion_gate_notices ogn 
+               JOIN gates g ON ogn.gate_id = g.id 
+               LEFT JOIN public_opinion_events poe ON ogn.event_id = poe.id 
+               WHERE 1=1"""
+    params = []
+    if gate_id:
+        query += " AND ogn.gate_id = ?"
+        params.append(gate_id)
+    if event_id:
+        query += " AND ogn.event_id = ?"
+        params.append(event_id)
+    if status:
+        query += " AND ogn.status = ?"
+        params.append(status)
+    query += " ORDER BY ogn.created_at DESC"
+    rows = conn.execute(query, params).fetchall()
+    result = [dict(r) for r in rows]
+    conn.close()
+    return result
+
+
+def publish_gate_notice(notice_id: int) -> dict:
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE public_opinion_gate_notices SET status = 'published' WHERE id = ?",
+            (notice_id,),
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_notice_templates(event_type: str = None, event_level: str = None) -> list[dict]:
+    conn = get_db()
+    query = "SELECT * FROM public_opinion_notice_templates WHERE is_active = 1"
+    params = []
+    if event_type:
+        query += " AND event_type = ?"
+        params.append(event_type)
+    if event_level:
+        query += " AND event_level = ?"
+        params.append(event_level)
+    query += " ORDER BY event_type, event_level"
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        d["event_type_label"] = _EVENT_TYPE_LABELS.get(d["event_type"], d["event_type"])
+        d["event_level_label"] = _EVENT_LEVEL_LABELS.get(d["event_level"], d["event_level"])
+        result.append(d)
+    conn.close()
+    return result
+
+
+def create_notice_template(template_name: str, event_type: str, event_level: str,
+                           template_content: str, announce_position: str = "gate_top") -> dict:
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO public_opinion_notice_templates 
+               (template_name, event_type, event_level, template_content, announce_position, is_active)
+               VALUES (?,?,?,?,?, 1)""",
+            (template_name, event_type, event_level, template_content, announce_position),
+        )
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_opinion_weekly_trend(start_date: str) -> dict:
+    conn = get_db()
+    dates = []
+    for i in range(7):
+        dt = datetime.strptime(start_date, "%Y-%m-%d") + timedelta(days=i)
+        dates.append(dt.strftime("%Y-%m-%d"))
+
+    daily_stats = []
+    type_stats = {k: 0 for k in _EVENT_TYPE_LABELS.keys()}
+    level_stats = {k: 0 for k in _EVENT_LEVEL_LABELS.keys()}
+    status_stats = {k: 0 for k in _STATUS_LABELS.keys()}
+    total_events = 0
+    unresolved = 0
+
+    for date_str in dates:
+        rows = conn.execute(
+            "SELECT * FROM public_opinion_events WHERE event_date = ?",
+            (date_str,),
+        ).fetchall()
+        day_count = len(rows)
+        total_events += day_count
+        day_resolved = sum(1 for r in rows if r["status"] in ("resolved", "closed"))
+        day_unresolved = day_count - day_resolved
+        unresolved += day_unresolved
+
+        daily_stats.append({
+            "date": date_str,
+            "total": day_count,
+            "resolved": day_resolved,
+            "unresolved": day_unresolved,
+        })
+
+        for r in rows:
+            type_stats[r["event_type"]] = type_stats.get(r["event_type"], 0) + 1
+            level_stats[r["event_level"]] = level_stats.get(r["event_level"], 0) + 1
+            status_stats[r["status"]] = status_stats.get(r["status"], 0) + 1
+
+    conn.close()
+
+    return {
+        "start_date": start_date,
+        "daily_stats": daily_stats,
+        "total_events": total_events,
+        "unresolved": unresolved,
+        "type_breakdown": [
+            {"type": k, "label": v, "count": type_stats.get(k, 0)}
+            for k, v in _EVENT_TYPE_LABELS.items()
+        ],
+        "level_breakdown": [
+            {"level": k, "label": v, "count": level_stats.get(k, 0)}
+            for k, v in _EVENT_LEVEL_LABELS.items()
+        ],
+        "status_breakdown": [
+            {"status": k, "label": v, "count": status_stats.get(k, 0)}
+            for k, v in _STATUS_LABELS.items()
+        ],
+    }
+
+
+def get_unclosed_warnings() -> list[dict]:
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT poe.*, g.gate_name, g.gate_code 
+           FROM public_opinion_events poe 
+           JOIN gates g ON poe.gate_id = g.id 
+           WHERE poe.status NOT IN ('resolved', 'closed')
+           ORDER BY poe.handle_deadline ASC, poe.event_level DESC"""
+    ).fetchall()
+    result = []
+    now = datetime.now()
+    for row in rows:
+        d = dict(row)
+        d["event_type_label"] = _EVENT_TYPE_LABELS.get(d["event_type"], d["event_type"])
+        d["event_level_label"] = _EVENT_LEVEL_LABELS.get(d["event_level"], d["event_level"])
+        d["status_label"] = _STATUS_LABELS.get(d["status"], d["status"])
+        try:
+            deadline = datetime.strptime(d["handle_deadline"], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            try:
+                deadline = datetime.strptime(d["handle_deadline"], "%Y-%m-%d")
+            except ValueError:
+                deadline = now
+        time_left = deadline - now
+        d["is_overdue"] = time_left.total_seconds() < 0
+        d["hours_left"] = int(time_left.total_seconds() / 3600)
+        level_priority = {"critical": 4, "serious": 3, "moderate": 2, "minor": 1}
+        d["priority_score"] = level_priority.get(d["event_level"], 0)
+        if d["is_overdue"]:
+            d["priority_score"] += 5
+        result.append(d)
+
+    result.sort(key=lambda x: x["priority_score"], reverse=True)
+    conn.close()
+    return result
+
+
+def get_event_timeline(event_id: int = None, limit: int = 50) -> list[dict]:
+    conn = get_db()
+    query = """SELECT pop.*, poe.title as event_title, poe.event_code, poe.status as event_status,
+                      g.gate_name, g.gate_code
+               FROM public_opinion_progress pop 
+               JOIN public_opinion_events poe ON pop.event_id = poe.id 
+               JOIN gates g ON poe.gate_id = g.id"""
+    params = []
+    if event_id:
+        query += " WHERE pop.event_id = ?"
+        params.append(event_id)
+    query += " ORDER BY pop.created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    type_icons = {
+        "report": "📝",
+        "assign": "📋",
+        "handle": "🔧",
+        "update": "📢",
+        "resolve": "✅",
+        "close": "🏁",
+    }
+    for row in rows:
+        d = dict(row)
+        d["progress_icon"] = type_icons.get(d["progress_type"], "📌")
+        d["event_type_label"] = _EVENT_TYPE_LABELS.get(d.get("event_type", ""), "")
+        d["event_status_label"] = _STATUS_LABELS.get(d["event_status"], d["event_status"])
+        result.append(d)
+    conn.close()
+    return result
+
+
+def delete_opinion_event(event_id: int) -> dict:
+    conn = get_db()
+    try:
+        event = conn.execute("SELECT * FROM public_opinion_events WHERE id = ?", (event_id,)).fetchone()
+        if not event:
+            return {"success": False, "error": "事件不存在"}
+        conn.execute("DELETE FROM public_opinion_events WHERE id = ?", (event_id,))
+        conn.commit()
+        return {"success": True}
+    except Exception as e:
+        conn.rollback()
+        return {"success": False, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_opinion_event_type_labels() -> dict:
+    return _EVENT_TYPE_LABELS
+
+
+def get_opinion_event_level_labels() -> dict:
+    return _EVENT_LEVEL_LABELS
+
+
+def get_opinion_time_period_labels() -> dict:
+    return _TIME_PERIOD_LABELS
+
+
+def get_opinion_status_labels() -> dict:
+    return _STATUS_LABELS
+
+
+def init_opinion_templates():
+    conn = get_db()
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM public_opinion_notice_templates").fetchone()[0]
+        if count > 0:
+            conn.close()
+            return
+
+        templates = [
+            ("商贩聚集-一般告示", "vendor_gathering", "minor",
+             "【城门告示】因周边商贩聚集，往来行人请注意安全，有序通行。城防人员正在现场疏导，请配合管理。", "gate_top"),
+            ("商贩聚集-严重告示", "vendor_gathering", "serious",
+             "【城门告示】因城门外商贩大量聚集，造成通道拥堵。城防部门正在全力疏导，请市民绕行其他城门或错峰出行。感谢配合！", "gate_top"),
+            ("百姓请愿-提示", "people_petition", "moderate",
+             "【城门告示】城门附近有民众陈情活动，城防部门正在妥善处理。请过往行人配合指引，绕行侧门通行，勿在附近逗留。", "gate_top"),
+            ("百姓请愿-警戒", "people_petition", "critical",
+             "【城门紧急告示】因城门附近聚集人员较多，已启动二级响应。请市民减少前往，配合城防人员管理，注意自身安全。", "gate_top"),
+            ("夜巡异常-提示", "patrol_anomaly", "moderate",
+             "【城门安全提示】近日夜巡发现异常情况，城防部门已加强巡逻。请市民提高警惕，发现可疑情况及时报告。", "gate_top"),
+            ("道路阻塞-提示", "road_blockage", "moderate",
+             "【道路通行提示】因前方道路临时阻塞，城门通行可能受阻。建议错峰出行或绕行其他城门。不便之处敬请谅解。", "gate_top"),
+            ("失火传闻-告示", "fire_rumor", "serious",
+             "【安全告示】近日有失火传闻，城防部门正在核实。请市民勿信谣传谣，关注官方通报。如遇火情请保持冷静，听从指挥疏散。", "gate_top"),
+        ]
+
+        for t in templates:
+            conn.execute(
+                """INSERT INTO public_opinion_notice_templates 
+                   (template_name, event_type, event_level, template_content, announce_position, is_active)
+                   VALUES (?,?,?,?,?, 1)""",
+                t,
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"初始化通告模板失败: {e}")
+    finally:
+        conn.close()

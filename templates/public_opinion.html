@@ -1,0 +1,773 @@
+{% extends "base.html" %}
+{% block title %}民情上报与通告响应 - 古城门启闭排班系统{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>民情上报与通告响应</h1>
+    <div class="header-actions">
+        <button class="btn btn-primary" onclick="openReportModal()">+ 上报民情事件</button>
+    </div>
+</div>
+
+<div class="stats-row">
+    <div class="stat-card">
+        <div class="stat-value" id="statTotal">0</div>
+        <div class="stat-label">本周事件总数</div>
+    </div>
+    <div class="stat-card stat-warning">
+        <div class="stat-value" id="statUnresolved">0</div>
+        <div class="stat-label">未闭环事件</div>
+    </div>
+    <div class="stat-card stat-danger">
+        <div class="stat-value" id="statOverdue">0</div>
+        <div class="stat-label">超期未处置</div>
+    </div>
+    <div class="stat-card stat-success">
+        <div class="stat-value" id="statResolved">0</div>
+        <div class="stat-label">已解决事件</div>
+    </div>
+</div>
+
+<div class="grid-row">
+    <div class="col-8">
+        <div class="card">
+            <div class="card-header">
+                <h3>事件时间线</h3>
+                <div class="card-actions">
+                    <select id="filterGate" onchange="loadEvents()" class="form-input">
+                        <option value="">全部城门</option>
+                        {% for g in gates %}
+                        <option value="{{ g.id }}">{{ g.gate_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <select id="filterStatus" onchange="loadEvents()" class="form-input">
+                        <option value="">全部状态</option>
+                        {% for k, v in status_labels.items() %}
+                        <option value="{{ k }}">{{ v }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            <div class="timeline" id="timeline">
+                <div class="timeline-empty">加载中...</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3>一周响应趋势</h3>
+                <div class="date-nav">
+                    <button class="btn-icon" onclick="changeWeek(-7)">◀</button>
+                    <span id="weekLabel">{{ start_date }}</span>
+                    <button class="btn-icon" onclick="changeWeek(7)">▶</button>
+                </div>
+            </div>
+            <div id="weeklyTrendChart" style="height: 300px;"></div>
+        </div>
+    </div>
+
+    <div class="col-4">
+        <div class="card">
+            <div class="card-header">
+                <h3>⚠️ 未闭环事件预警</h3>
+            </div>
+            <div class="warning-list" id="warningList">
+                <div class="warning-empty">加载中...</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h3>事件类型分布</h3>
+            </div>
+            <div id="typeChart" style="height: 250px;"></div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h3>事件列表</h3>
+    </div>
+    <div class="table-responsive">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>事件编号</th>
+                    <th>城门</th>
+                    <th>日期</th>
+                    <th>时段</th>
+                    <th>类型</th>
+                    <th>等级</th>
+                    <th>可信度</th>
+                    <th>状态</th>
+                    <th>处置时限</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody id="eventTableBody">
+                <tr><td colspan="10" class="text-center">加载中...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="modal" id="reportModal">
+    <div class="modal-content modal-lg">
+        <div class="modal-header">
+            <h3>上报民情事件</h3>
+            <button class="btn-close" onclick="closeReportModal()">&times;</button>
+        </div>
+        <form method="POST" action="/public-opinion/add">
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>涉事城门 *</label>
+                        <select name="gate_id" required class="form-input">
+                            {% for g in gates %}
+                            <option value="{{ g.id }}">{{ g.gate_name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>事件日期 *</label>
+                        <input type="date" name="event_date" required class="form-input" id="eventDate">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>时段 *</label>
+                        <select name="time_period" required class="form-input">
+                            {% for k, v in time_period_labels.items() %}
+                            <option value="{{ k }}">{{ v }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>事件类型 *</label>
+                        <select name="event_type" required class="form-input">
+                            {% for k, v in event_type_labels.items() %}
+                            <option value="{{ k }}">{{ v }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>事件等级 *</label>
+                        <select name="event_level" required class="form-input">
+                            {% for k, v in event_level_labels.items() %}
+                            <option value="{{ k }}">{{ v }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>可信度 (0-100)</label>
+                        <input type="number" name="credibility" min="0" max="100" value="50" class="form-input">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>处置时限 *</label>
+                        <input type="datetime-local" name="handle_deadline" required class="form-input" id="deadline">
+                    </div>
+                    <div class="form-group">
+                        <label>上报人</label>
+                        <input type="text" name="reporter" class="form-input" placeholder="请输入上报人">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>事件标题 *</label>
+                    <input type="text" name="title" required class="form-input" placeholder="请输入事件标题">
+                </div>
+                <div class="form-group">
+                    <label>事件描述</label>
+                    <textarea name="description" rows="4" class="form-input" placeholder="请详细描述事件情况..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeReportModal()">取消</button>
+                <button type="submit" class="btn btn-primary">提交上报</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<div class="modal" id="detailModal">
+    <div class="modal-content modal-xl">
+        <div class="modal-header">
+            <h3 id="detailTitle">事件详情</h3>
+            <button class="btn-close" onclick="closeDetailModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="detailBody">
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeDetailModal()">关闭</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentStartDate = "{{ start_date }}";
+
+document.addEventListener('DOMContentLoaded', function() {
+    const today = new Date().toISOString().split('T')[0];
+    document.getElementById('eventDate').value = today;
+
+    const now = new Date();
+    now.setHours(now.getHours() + 24);
+    const deadlineStr = now.toISOString().slice(0, 16);
+    document.getElementById('deadline').value = deadlineStr;
+
+    loadAllData();
+});
+
+function loadAllData() {
+    loadEvents();
+    loadWarnings();
+    loadWeeklyTrend();
+}
+
+function loadEvents() {
+    const gateId = document.getElementById('filterGate').value;
+    const status = document.getElementById('filterStatus').value;
+    const endDate = addDays(currentStartDate, 6);
+
+    let url = `/api/public-opinion/events?start_date=${currentStartDate}&end_date=${endDate}`;
+    if (gateId) url += `&gate_id=${gateId}`;
+    if (status) url += `&status=${status}`;
+
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            renderTimeline(data);
+            renderEventTable(data);
+            updateStats(data);
+            renderTypeChart(data);
+        });
+}
+
+function loadWarnings() {
+    fetch('/api/public-opinion/unclosed-warnings')
+        .then(r => r.json())
+        .then(data => {
+            renderWarnings(data);
+        });
+}
+
+function loadWeeklyTrend() {
+    fetch(`/api/public-opinion/weekly-trend?start_date=${currentStartDate}`)
+        .then(r => r.json())
+        .then(data => {
+            renderWeeklyTrendChart(data);
+            document.getElementById('weekLabel').textContent = `${data.start_date} ~ ${addDays(data.start_date, 6)}`;
+        });
+}
+
+function renderTimeline(events) {
+    const container = document.getElementById('timeline');
+    if (!events || events.length === 0) {
+        container.innerHTML = '<div class="timeline-empty">暂无事件数据</div>';
+        return;
+    }
+
+    let html = '';
+    const statusColors = {
+        'reported': 'status-reported',
+        'responding': 'status-responding',
+        'handling': 'status-handling',
+        'resolved': 'status-resolved',
+        'closed': 'status-closed',
+    };
+
+    events.slice(0, 20).forEach((event, idx) => {
+        html += `
+            <div class="timeline-item">
+                <div class="timeline-dot ${statusColors[event.status] || ''}"></div>
+                <div class="timeline-content">
+                    <div class="timeline-header">
+                        <span class="timeline-title">${event.title}</span>
+                        <span class="timeline-badge level-${event.event_level}">${event.event_level_label}</span>
+                    </div>
+                    <div class="timeline-meta">
+                        <span>🏛️ ${event.gate_name}</span>
+                        <span>📅 ${event.event_date}</span>
+                        <span>🕐 ${event.time_period_label}</span>
+                        <span class="status-badge ${statusColors[event.status] || ''}">${event.status_label}</span>
+                    </div>
+                    <div class="timeline-desc">${event.description || '暂无描述'}</div>
+                    <div class="timeline-actions">
+                        <button class="btn-link" onclick="viewEventDetail(${event.id})">查看详情</button>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+function renderEventTable(events) {
+    const tbody = document.getElementById('eventTableBody');
+    if (!events || events.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="10" class="text-center">暂无数据</td></tr>';
+        return;
+    }
+
+    let html = '';
+    const levelClasses = {
+        'minor': 'level-minor',
+        'moderate': 'level-moderate',
+        'serious': 'level-serious',
+        'critical': 'level-critical',
+    };
+    const statusClasses = {
+        'reported': 'status-reported',
+        'responding': 'status-responding',
+        'handling': 'status-handling',
+        'resolved': 'status-resolved',
+        'closed': 'status-closed',
+    };
+
+    events.forEach(event => {
+        html += `
+            <tr>
+                <td>${event.event_code}</td>
+                <td>${event.gate_name}</td>
+                <td>${event.event_date}</td>
+                <td>${event.time_period_label}</td>
+                <td>${event.event_type_label}</td>
+                <td><span class="level-badge ${levelClasses[event.event_level] || ''}">${event.event_level_label}</span></td>
+                <td>
+                    <div class="credibility-bar">
+                        <div class="credibility-fill" style="width: ${event.credibility}%"></div>
+                        <span class="credibility-text">${event.credibility}%</span>
+                    </div>
+                </td>
+                <td><span class="status-badge ${statusClasses[event.status] || ''}">${event.status_label}</span></td>
+                <td>${event.handle_deadline}</td>
+                <td>
+                    <button class="btn-link" onclick="viewEventDetail(${event.id})">详情</button>
+                </td>
+            </tr>
+        `;
+    });
+
+    tbody.innerHTML = html;
+}
+
+function updateStats(events) {
+    const total = events.length;
+    const unresolved = events.filter(e => e.status !== 'resolved' && e.status !== 'closed').length;
+    const resolved = events.filter(e => e.status === 'resolved' || e.status === 'closed').length;
+    const now = new Date();
+    const overdue = events.filter(e => {
+        if (e.status === 'resolved' || e.status === 'closed') return false;
+        const deadline = new Date(e.handle_deadline);
+        return deadline < now;
+    }).length;
+
+    document.getElementById('statTotal').textContent = total;
+    document.getElementById('statUnresolved').textContent = unresolved;
+    document.getElementById('statOverdue').textContent = overdue;
+    document.getElementById('statResolved').textContent = resolved;
+}
+
+function renderWarnings(warnings) {
+    const container = document.getElementById('warningList');
+    if (!warnings || warnings.length === 0) {
+        container.innerHTML = '<div class="warning-empty">暂无预警事件</div>';
+        return;
+    }
+
+    let html = '';
+    warnings.slice(0, 10).forEach(w => {
+        const levelClass = w.is_overdue ? 'warning-overdue' : (w.priority_score >= 5 ? 'warning-high' : 'warning-medium');
+        html += `
+            <div class="warning-item ${levelClass}">
+                <div class="warning-header">
+                    <span class="warning-title">${w.title}</span>
+                    <span class="warning-level">${w.event_level_label}</span>
+                </div>
+                <div class="warning-meta">
+                    <span>🏛️ ${w.gate_name}</span>
+                    <span>${w.is_overdue ? '⚠️ 已超期' : '⏳ ' + Math.abs(w.hours_left) + '小时'}</span>
+                </div>
+                <div class="warning-action">
+                    <button class="btn-link btn-sm" onclick="viewEventDetail(${w.id})">立即处理</button>
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = html;
+}
+
+function renderWeeklyTrendChart(data) {
+    const dates = data.daily_stats.map(d => d.date.slice(5));
+    const totalData = data.daily_stats.map(d => d.total);
+    const resolvedData = data.daily_stats.map(d => d.resolved);
+    const unresolvedData = data.daily_stats.map(d => d.unresolved);
+
+    const trace1 = {
+        x: dates,
+        y: totalData,
+        name: '总事件数',
+        type: 'bar',
+        marker: { color: '#c9a84c' }
+    };
+    const trace2 = {
+        x: dates,
+        y: resolvedData,
+        name: '已解决',
+        type: 'bar',
+        marker: { color: '#27ae60' }
+    };
+    const trace3 = {
+        x: dates,
+        y: unresolvedData,
+        name: '未解决',
+        type: 'scatter',
+        mode: 'lines+markers',
+        line: { color: '#e74c3c', width: 2 }
+    };
+
+    const layout = {
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#e8e0d4', family: '"Noto Serif SC", serif' },
+        legend: { orientation: 'h', y: -0.2 },
+        margin: { l: 40, r: 20, t: 20, b: 40 },
+        barmode: 'stack',
+    };
+
+    Plotly.newPlot('weeklyTrendChart', [trace1, trace2, trace3], layout, { responsive: true, displayModeBar: false });
+}
+
+function renderTypeChart(events) {
+    const typeCounts = {};
+    const typeLabels = {
+        'vendor_gathering': '商贩聚集',
+        'people_petition': '百姓请愿',
+        'patrol_anomaly': '夜巡异常',
+        'road_blockage': '道路阻塞',
+        'fire_rumor': '失火传闻',
+        'other': '其他',
+    };
+
+    events.forEach(e => {
+        typeCounts[e.event_type] = (typeCounts[e.event_type] || 0) + 1;
+    });
+
+    const labels = Object.keys(typeCounts).map(k => typeLabels[k] || k);
+    const values = Object.values(typeCounts);
+    const colors = ['#c9a84c', '#e67e22', '#2980b9', '#27ae60', '#c0392b', '#8e44ad'];
+
+    const data = [{
+        values: values,
+        labels: labels,
+        type: 'pie',
+        hole: 0.4,
+        marker: { colors: colors },
+        textinfo: 'label+percent',
+        textposition: 'outside',
+    }];
+
+    const layout = {
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#e8e0d4', family: '"Noto Serif SC", serif', size: 11 },
+        showlegend: false,
+        margin: { l: 0, r: 0, t: 10, b: 10 },
+    };
+
+    Plotly.newPlot('typeChart', data, layout, { responsive: true, displayModeBar: false });
+}
+
+function viewEventDetail(eventId) {
+    Promise.all([
+        fetch(`/api/public-opinion/events/${eventId}`).then(r => r.json()),
+        fetch(`/api/public-opinion/events/${eventId}/progress`).then(r => r.json()),
+        fetch(`/api/public-opinion/events/${eventId}/responses`).then(r => r.json()),
+    ]).then(([event, progress, responses]) => {
+        renderEventDetail(event, progress, responses);
+        document.getElementById('detailModal').style.display = 'flex';
+    });
+}
+
+function renderEventDetail(event, progress, responses) {
+    document.getElementById('detailTitle').textContent = `${event.event_code} - ${event.title}`;
+
+    const levelClasses = {
+        'minor': 'level-minor',
+        'moderate': 'level-moderate',
+        'serious': 'level-serious',
+        'critical': 'level-critical',
+    };
+    const statusClasses = {
+        'reported': 'status-reported',
+        'responding': 'status-responding',
+        'handling': 'status-handling',
+        'resolved': 'status-resolved',
+        'closed': 'status-closed',
+    };
+
+    let responseHtml = '';
+    responses.forEach(r => {
+        responseHtml += `
+            <div class="response-card">
+                <div class="response-header">
+                    <span class="response-type">${r.response_type_label}</span>
+                    <span class="response-priority">优先级: ${r.priority}</span>
+                    <span class="response-status status-${r.status}">${r.status === 'proposed' ? '待处理' : r.status === 'approved' ? '已批准' : r.status === 'executed' ? '已执行' : '已拒绝'}</span>
+                </div>
+                <div class="response-title">${r.title}</div>
+                <pre class="response-content">${r.content}</pre>
+                <div class="response-actions">
+                    <button class="btn btn-success btn-sm" onclick="updateResponseStatus(${r.id}, 'approved')">批准</button>
+                    <button class="btn btn-primary btn-sm" onclick="updateResponseStatus(${r.id}, 'executed')">执行</button>
+                    <button class="btn btn-danger btn-sm" onclick="updateResponseStatus(${r.id}, 'rejected')">拒绝</button>
+                </div>
+            </div>
+        `;
+    });
+
+    let progressHtml = '';
+    const typeIcons = {
+        'report': '📝',
+        'assign': '📋',
+        'handle': '🔧',
+        'update': '📢',
+        'resolve': '✅',
+        'close': '🏁',
+    };
+    progress.forEach(p => {
+        progressHtml += `
+            <div class="progress-item">
+                <div class="progress-icon">${typeIcons[p.progress_type] || '📌'}</div>
+                <div class="progress-content">
+                    <div class="progress-title">${p.title}</div>
+                    <div class="progress-meta">${p.operator || '系统'} · ${p.created_at}</div>
+                    ${p.content ? `<div class="progress-desc">${p.content}</div>` : ''}
+                </div>
+            </div>
+        `;
+    });
+
+    const html = `
+        <div class="detail-grid">
+            <div class="detail-main">
+                <div class="card">
+                    <div class="card-header">
+                        <h4>基本信息</h4>
+                    </div>
+                    <div class="detail-info">
+                        <div class="info-row">
+                            <span class="info-label">事件编号</span>
+                            <span class="info-value">${event.event_code}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">涉事城门</span>
+                            <span class="info-value">${event.gate_name}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">事件日期</span>
+                            <span class="info-value">${event.event_date}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">事发时段</span>
+                            <span class="info-value">${event.time_period_label}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">事件类型</span>
+                            <span class="info-value">${event.event_type_label}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">事件等级</span>
+                            <span class="info-value"><span class="level-badge ${levelClasses[event.event_level] || ''}">${event.event_level_label}</span></span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">可信度</span>
+                            <span class="info-value">${event.credibility}%</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">当前状态</span>
+                            <span class="info-value"><span class="status-badge ${statusClasses[event.status] || ''}">${event.status_label}</span></span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">处置时限</span>
+                            <span class="info-value">${event.handle_deadline}</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">上报人</span>
+                            <span class="info-value">${event.reporter || '系统'}</span>
+                        </div>
+                    </div>
+                    <div class="detail-desc">
+                        <h5>事件描述</h5>
+                        <p>${event.description || '暂无描述'}</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h4>处置进度</h4>
+                    </div>
+                    <div class="progress-timeline">
+                        ${progressHtml || '<div class="empty-text">暂无进度记录</div>'}
+                    </div>
+                </div>
+            </div>
+
+            <div class="detail-side">
+                <div class="card">
+                    <div class="card-header">
+                        <h4>自动响应建议</h4>
+                    </div>
+                    <div class="response-list">
+                        ${responseHtml || '<div class="empty-text">暂无响应建议</div>'}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h4>状态变更</h4>
+                    </div>
+                    <div class="status-actions">
+                        <button class="btn btn-warning btn-block" onclick="changeEventStatus(${event.id}, 'responding')">开始响应</button>
+                        <button class="btn btn-primary btn-block" onclick="changeEventStatus(${event.id}, 'handling')">进入处置</button>
+                        <button class="btn btn-success btn-block" onclick="changeEventStatus(${event.id}, 'resolved')">标记解决</button>
+                        <button class="btn btn-secondary btn-block" onclick="changeEventStatus(${event.id}, 'closed')">结案归档</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h4>添加进度</h4>
+                    </div>
+                    <div class="add-progress-form">
+                        <select id="progressType" class="form-input">
+                            <option value="update">进展更新</option>
+                            <option value="handle">处置记录</option>
+                            <option value="report">补充上报</option>
+                        </select>
+                        <input type="text" id="progressTitle" class="form-input" placeholder="进度标题">
+                        <textarea id="progressContent" class="form-input" rows="2" placeholder="进度详情..."></textarea>
+                        <button class="btn btn-primary btn-block" onclick="addProgress(${event.id})">添加进度</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+    document.getElementById('detailBody').innerHTML = html;
+}
+
+function changeEventStatus(eventId, status) {
+    const note = prompt('请输入状态变更说明（可选）:');
+    if (note === null) return;
+
+    const formData = new FormData();
+    formData.append('status', status);
+    formData.append('note', note || '');
+
+    fetch(`/public-opinion/${eventId}/status`, {
+        method: 'POST',
+        body: formData
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            showToast('状态更新成功', 'success');
+            viewEventDetail(eventId);
+            loadAllData();
+        } else {
+            showToast(data.error || '更新失败', 'error');
+        }
+    });
+}
+
+function addProgress(eventId) {
+    const progressType = document.getElementById('progressType').value;
+    const title = document.getElementById('progressTitle').value;
+    const content = document.getElementById('progressContent').value;
+
+    if (!title) {
+        showToast('请输入进度标题', 'error');
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('progress_type', progressType);
+    formData.append('title', title);
+    formData.append('content', content);
+
+    fetch(`/public-opinion/${eventId}/progress`, {
+        method: 'POST',
+        body: formData
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            showToast('进度添加成功', 'success');
+            viewEventDetail(eventId);
+            loadAllData();
+        } else {
+            showToast(data.error || '添加失败', 'error');
+        }
+    });
+}
+
+function updateResponseStatus(responseId, status) {
+    fetch(`/api/public-opinion/responses/${responseId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            showToast('响应状态更新成功', 'success');
+            const eventId = new URLSearchParams(window.location.search).get('event_id');
+            loadAllData();
+            if (eventId) viewEventDetail(eventId);
+        } else {
+            showToast(data.error || '更新失败', 'error');
+        }
+    });
+}
+
+function changeWeek(offset) {
+    const date = new Date(currentStartDate);
+    date.setDate(date.getDate() + offset);
+    currentStartDate = date.toISOString().split('T')[0];
+    loadAllData();
+}
+
+function addDays(dateStr, days) {
+    const date = new Date(dateStr);
+    date.setDate(date.getDate() + days);
+    return date.toISOString().split('T')[0];
+}
+
+function openReportModal() {
+    document.getElementById('reportModal').style.display = 'flex';
+}
+
+function closeReportModal() {
+    document.getElementById('reportModal').style.display = 'none';
+}
+
+function closeDetailModal() {
+    document.getElementById('detailModal').style.display = 'none';
+}
+
+window.onclick = function(event) {
+    if (event.target.classList.contains('modal')) {
+        event.target.style.display = 'none';
+    }
+};
+</script>
+{% endblock %}

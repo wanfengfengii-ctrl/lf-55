@@ -58,6 +58,27 @@ from services import (
     get_allocation_comparison,
     get_resource_gaps,
     full_defense_evaluation,
+    get_all_opinion_events,
+    get_opinion_event,
+    create_opinion_event,
+    update_opinion_event_status,
+    add_event_progress,
+    get_event_progress,
+    get_event_responses,
+    update_response_status,
+    get_gate_notices,
+    publish_gate_notice,
+    get_notice_templates,
+    create_notice_template,
+    get_opinion_weekly_trend,
+    get_unclosed_warnings,
+    get_event_timeline,
+    delete_opinion_event,
+    init_opinion_templates,
+    get_opinion_event_type_labels,
+    get_opinion_event_level_labels,
+    get_opinion_time_period_labels,
+    get_opinion_status_labels,
 )
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -155,6 +176,7 @@ def _seed_data():
 
     conn.commit()
     conn.close()
+    init_opinion_templates()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1130,3 +1152,180 @@ async def api_get_non_executable_rules(gate_id: int, date_str: str, time_period:
         "rules": evaluation["non_executable_rules"],
         "can_execute": evaluation["can_execute"],
     })
+
+
+@app.get("/public-opinion", response_class=HTMLResponse)
+async def public_opinion_page(request: Request, start_date: str = None, error: str = None):
+    if not start_date:
+        today = datetime.now()
+        start_of_week = today - timedelta(days=today.weekday())
+        start_date = start_of_week.strftime("%Y-%m-%d")
+
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    gates = [dict(g) for g in gates]
+    conn.close()
+
+    event_type_labels = get_opinion_event_type_labels()
+    event_level_labels = get_opinion_event_level_labels()
+    time_period_labels = get_opinion_time_period_labels()
+    status_labels = get_opinion_status_labels()
+
+    return templates.TemplateResponse("public_opinion.html", {
+        "request": request,
+        "start_date": start_date,
+        "gates": gates,
+        "event_type_labels": event_type_labels,
+        "event_level_labels": event_level_labels,
+        "time_period_labels": time_period_labels,
+        "status_labels": status_labels,
+        "active_page": "public_opinion",
+        "error_msg": error,
+    })
+
+
+@app.post("/public-opinion/add")
+async def add_opinion_event(
+    gate_id: int = Form(...),
+    event_date: str = Form(...),
+    time_period: str = Form(...),
+    event_type: str = Form(...),
+    event_level: str = Form(...),
+    credibility: int = Form(50),
+    handle_deadline: str = Form(...),
+    title: str = Form(...),
+    description: str = Form(""),
+    reporter: str = Form(""),
+):
+    result = create_opinion_event(
+        gate_id, event_date, time_period, event_type, event_level,
+        credibility, handle_deadline, title, description, reporter
+    )
+    if not result.get("success"):
+        return redirect_with_error("/public-opinion", result.get("error", "创建事件失败"))
+    return RedirectResponse(url="/public-opinion", status_code=303)
+
+
+@app.post("/public-opinion/{event_id}/status")
+async def update_opinion_status(event_id: int, status: str = Form(...), note: str = Form("")):
+    result = update_opinion_event_status(event_id, status, note=note)
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.post("/public-opinion/{event_id}/progress")
+async def add_opinion_progress(
+    event_id: int,
+    progress_type: str = Form(...),
+    title: str = Form(...),
+    content: str = Form(""),
+    operator: str = Form(""),
+):
+    result = add_event_progress(event_id, progress_type, title, content, operator)
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.post("/public-opinion/{event_id}/delete")
+async def delete_opinion_event_route(event_id: int):
+    result = delete_opinion_event(event_id)
+    if not result.get("success"):
+        return redirect_with_error("/public-opinion", result.get("error", "删除失败"))
+    return RedirectResponse(url="/public-opinion", status_code=303)
+
+
+@app.get("/api/public-opinion/events")
+async def api_get_opinion_events(
+    gate_id: int = None,
+    start_date: str = None,
+    end_date: str = None,
+    status: str = None,
+    event_type: str = None,
+):
+    events = get_all_opinion_events(gate_id, start_date, end_date, status, event_type)
+    return JSONResponse(content=events)
+
+
+@app.get("/api/public-opinion/events/{event_id}")
+async def api_get_opinion_event(event_id: int):
+    event = get_opinion_event(event_id)
+    if not event:
+        return JSONResponse(content={"error": "事件不存在"}, status_code=404)
+    return JSONResponse(content=event)
+
+
+@app.get("/api/public-opinion/events/{event_id}/progress")
+async def api_get_event_progress(event_id: int):
+    progress = get_event_progress(event_id)
+    return JSONResponse(content=progress)
+
+
+@app.get("/api/public-opinion/events/{event_id}/responses")
+async def api_get_event_responses(event_id: int):
+    responses = get_event_responses(event_id)
+    return JSONResponse(content=responses)
+
+
+@app.post("/api/public-opinion/responses/{response_id}/status")
+async def api_update_response_status(response_id: int, request: Request):
+    body = await request.json()
+    status = body.get("status", "proposed")
+    result = update_response_status(response_id, status)
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/public-opinion/gate-notices")
+async def api_get_gate_notices(gate_id: int = None, event_id: int = None, status: str = None):
+    notices = get_gate_notices(gate_id, event_id, status)
+    return JSONResponse(content=notices)
+
+
+@app.post("/api/public-opinion/gate-notices/{notice_id}/publish")
+async def api_publish_gate_notice(notice_id: int):
+    result = publish_gate_notice(notice_id)
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/public-opinion/templates")
+async def api_get_notice_templates(event_type: str = None, event_level: str = None):
+    templates = get_notice_templates(event_type, event_level)
+    return JSONResponse(content=templates)
+
+
+@app.post("/api/public-opinion/templates")
+async def api_create_notice_template(request: Request):
+    body = await request.json()
+    result = create_notice_template(
+        body.get("template_name", ""),
+        body.get("event_type", ""),
+        body.get("event_level", ""),
+        body.get("template_content", ""),
+        body.get("announce_position", "gate_top"),
+    )
+    if not result.get("success"):
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/public-opinion/weekly-trend")
+async def api_get_opinion_weekly_trend(start_date: str):
+    trend = get_opinion_weekly_trend(start_date)
+    return JSONResponse(content=trend)
+
+
+@app.get("/api/public-opinion/unclosed-warnings")
+async def api_get_unclosed_warnings():
+    warnings = get_unclosed_warnings()
+    return JSONResponse(content=warnings)
+
+
+@app.get("/api/public-opinion/timeline")
+async def api_get_event_timeline(event_id: int = None, limit: int = 50):
+    timeline = get_event_timeline(event_id, limit)
+    return JSONResponse(content=timeline)
