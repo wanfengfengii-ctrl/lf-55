@@ -52,6 +52,28 @@
     <div id="weeklyChart" style="min-height:450px;"></div>
 </div>
 
+<div id="scheduleOverloadPanel" class="card" style="display:none;border-color:var(--accent-red);">
+    <h2 style="color:var(--accent-red);">⚠ 流量超负荷预警</h2>
+    <div id="scheduleOverloadList"></div>
+</div>
+
+<div class="card">
+    <h2>高峰流量预测曲线</h2>
+    <div class="form-grid" style="grid-template-columns: 200px auto;margin-bottom:1rem;">
+        <div class="form-group">
+            <label>选择城门</label>
+            <select id="trafficPredictGateSelect" onchange="renderScheduleTrafficChart()">
+            </select>
+        </div>
+    </div>
+    <div id="scheduleTrafficChart" style="min-height:400px;"></div>
+</div>
+
+<div class="card">
+    <h2>调度建议</h2>
+    <div id="scheduleDispatchList"></div>
+</div>
+
 <div class="card">
     <h2>方案对比</h2>
     <div class="form-grid" style="grid-template-columns: 250px auto;">
@@ -299,16 +321,25 @@ async function loadChartData(startDate) {
     try {
         const resp = await fetch(`/api/schedules/chart-data?start_date=${startDate}`);
         chartData = await resp.json();
-        
+
         const sel = document.getElementById('comparisonGateSelect');
         sel.innerHTML = '';
         chartData.gates.forEach((gate, idx) => {
             sel.innerHTML += `<option value="${idx}">${gate.gate_name} (${gate.gate_code})</option>`;
         });
         sel.value = '0';
-        
+
+        const trafficSel = document.getElementById('trafficPredictGateSelect');
+        trafficSel.innerHTML = '';
+        chartData.gates.forEach((gate, idx) => {
+            trafficSel.innerHTML += `<option value="${idx}">${gate.gate_name} (${gate.gate_code})</option>`;
+        });
+
         renderWeeklyChart();
         renderComparisonChart();
+        loadScheduleTrafficData(startDate);
+        loadScheduleOverloadWarnings(startDate);
+        loadScheduleDispatchSuggestions(startDate);
     } catch (e) {
         console.error('Chart data error:', e);
     }
@@ -616,6 +647,125 @@ async function publishSchedule() {
     } catch (e) {
         showToast('发布失败: ' + e.message, 'error');
     }
+}
+
+let scheduleTrafficData = null;
+
+function loadScheduleTrafficData(startDate) {
+    fetch(`/api/traffic/predictions?start_date=${startDate}`)
+        .then(r => r.json())
+        .then(data => {
+            scheduleTrafficData = data;
+            renderScheduleTrafficChart();
+        })
+        .catch(() => {});
+}
+
+function renderScheduleTrafficChart() {
+    if (!scheduleTrafficData || !scheduleTrafficData.gates.length) {
+        document.getElementById('scheduleTrafficChart').innerHTML = '<p style="color:var(--text-secondary);text-align:center;padding:2rem;">暂无流量预测数据，请先在流量预测页生成预测</p>';
+        return;
+    }
+    const sel = document.getElementById('trafficPredictGateSelect');
+    const idx = parseInt(sel.value) || 0;
+    const gate = scheduleTrafficData.gates[idx];
+    if (!gate) return;
+
+    const dates = scheduleTrafficData.dates.map(d => d.slice(5));
+    const traces = [];
+
+    traces.push({
+        x: dates, y: gate.morning_peak.map(p => p.predicted_volume), name: '早高峰预测',
+        type: 'scatter', mode: 'lines+markers',
+        line: { color: '#e67e22', width: 3 }, marker: { size: 8 },
+        fill: 'tozeroy', fillcolor: 'rgba(230,126,34,0.1)',
+    });
+    traces.push({
+        x: dates, y: gate.evening_peak.map(p => p.predicted_volume), name: '晚高峰预测',
+        type: 'scatter', mode: 'lines+markers',
+        line: { color: '#9b59b6', width: 3 }, marker: { size: 8 },
+        fill: 'tozeroy', fillcolor: 'rgba(155,89,182,0.1)',
+    });
+    traces.push({
+        x: dates, y: Array(7).fill(gate.peak_capacity), name: '容量上限',
+        type: 'scatter', mode: 'lines',
+        line: { color: '#c0392b', width: 2, dash: 'dash' },
+    });
+
+    const layout = {
+        title: { text: `${gate.gate_name} 高峰流量预测`, font: { color: '#c9a84c', size: 16 } },
+        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#a89b8c' },
+        xaxis: { title: '日期', gridcolor: '#2c3e6b' },
+        yaxis: { title: '通行量（人）', gridcolor: '#2c3e6b' },
+        legend: { orientation: 'h', y: -0.2 },
+        margin: { l: 60, r: 30, t: 40, b: 80 },
+        height: 380,
+        shapes: [{
+            type: 'rect', x0: 0, x1: 1, y0: gate.peak_capacity, y1: 9999,
+            xref: 'paper', fillcolor: 'rgba(192,57,43,0.05)', line: { width: 0 },
+        }],
+    };
+    Plotly.newPlot('scheduleTrafficChart', traces, layout, { responsive: true });
+}
+
+function loadScheduleOverloadWarnings(startDate) {
+    fetch(`/api/traffic/overload-warnings?start_date=${startDate}`)
+        .then(r => r.json())
+        .then(data => {
+            const panel = document.getElementById('scheduleOverloadPanel');
+            const list = document.getElementById('scheduleOverloadList');
+            if (!data.length) { panel.style.display = 'none'; return; }
+            panel.style.display = '';
+            let html = '';
+            data.slice(0, 10).forEach(w => {
+                const severity = w.overload_ratio > 1.5 ? 'alert-danger' : 'alert-warning';
+                const icon = w.overload_ratio > 1.5 ? '🔴' : '🟡';
+                html += `<div class="alert ${severity}" style="margin-bottom:0.5rem;">
+                    ${icon} <strong>${w.gate_name}</strong> ${w.predict_date} ${w.period_label}
+                    超容量${w.overload_pct}%（预测${w.predicted_volume}人）
+                </div>`;
+            });
+            list.innerHTML = html;
+        })
+        .catch(() => {});
+}
+
+function loadScheduleDispatchSuggestions(startDate) {
+    let url = '/api/traffic/dispatch-suggestions?status=pending';
+    if (startDate) url += `&start_date=${startDate}`;
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            const container = document.getElementById('scheduleDispatchList');
+            if (!data.length) { container.innerHTML = '<p style="color:var(--text-secondary);">暂无待处理调度建议</p>'; return; }
+            let html = '';
+            data.forEach(s => {
+                const typeColors = { stagger_open: 'badge-gold', delay_close: 'badge-blue', temp_divert: 'badge-orange', gate_switch: 'badge-purple' };
+                const labels = { stagger_open: '分时开门', delay_close: '延后关门', temp_divert: '临时分流', gate_switch: '主副门切换' };
+                const badge = `<span class="badge ${typeColors[s.suggestion_type] || 'badge-gold'}">${labels[s.suggestion_type] || s.suggestion_type}</span>`;
+                html += `<div style="padding:0.5rem 0.75rem;border:1px solid var(--border-color);border-radius:var(--radius);margin-bottom:0.4rem;border-left:3px solid var(--accent-orange);">
+                    ${badge} <strong>${s.gate_name}</strong> ${s.suggest_date}
+                    <span style="color:var(--text-secondary);font-size:0.85rem;">- ${s.description.slice(0, 60)}...</span>
+                    <button class="btn btn-success btn-sm" style="float:right;" onclick="executeScheduleDispatch(${s.id})">执行</button>
+                </div>`;
+            });
+            container.innerHTML = html;
+        })
+        .catch(() => {});
+}
+
+function executeScheduleDispatch(id) {
+    fetch(`/api/traffic/dispatch-execute/${id}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                showToast('调度建议已执行', 'success');
+                const startDate = document.getElementById('startDate').value;
+                loadScheduleDispatchSuggestions(startDate);
+            } else { showToast(data.error || '执行失败', 'error'); }
+        })
+        .catch(() => showToast('执行失败', 'error'));
 }
 
 document.addEventListener('DOMContentLoaded', function() {

@@ -25,6 +25,16 @@ from services import (
     preview_conflicts,
     simulate_batch_publish,
     get_linkage_weekly_comparison,
+    add_traffic_history,
+    batch_add_traffic_history,
+    get_traffic_history,
+    predict_traffic_for_week,
+    get_traffic_predictions,
+    get_dispatch_suggestions,
+    execute_dispatch_suggestion,
+    dismiss_dispatch_suggestion,
+    get_dispatch_comparison,
+    get_overload_warnings,
 )
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -825,3 +835,96 @@ async def api_linkage_strategies_list():
         "strategy_name": s["strategy_name"],
         "is_active": s["is_active"],
     } for s in strategies])
+
+
+@app.get("/traffic-prediction", response_class=HTMLResponse)
+async def traffic_prediction_page(request: Request, error: str = None):
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    conn.close()
+    today = datetime.now()
+    start_of_week = today - timedelta(days=today.weekday())
+    start_date = start_of_week.strftime("%Y-%m-%d")
+    return templates.TemplateResponse("traffic_prediction.html", {
+        "request": request,
+        "gates": gates,
+        "start_date": start_date,
+        "active_page": "traffic_prediction",
+        "error_msg": error,
+    })
+
+
+@app.post("/api/traffic/history")
+async def api_add_traffic_history(request: Request):
+    body = await request.json()
+    records = body.get("records", [])
+    if not records:
+        return JSONResponse(content={"success": False, "error": "无数据"}, status_code=400)
+    result = batch_add_traffic_history(records)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/traffic/history")
+async def api_get_traffic_history(gate_id: int = None, start_date: str = None,
+                                  end_date: str = None, time_period: str = None):
+    result = get_traffic_history(gate_id, start_date, end_date, time_period)
+    return JSONResponse(content=result)
+
+
+@app.post("/api/traffic/predict")
+async def api_predict_traffic(request: Request):
+    body = await request.json()
+    start_date = body.get("start_date")
+    if not start_date:
+        return JSONResponse(content={"error": "请提供起始日期"}, status_code=400)
+    result = predict_traffic_for_week(start_date)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/traffic/predictions")
+async def api_get_predictions(start_date: str):
+    result = get_traffic_predictions(start_date)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/traffic/dispatch-suggestions")
+async def api_get_dispatch_suggestions(start_date: str = None, status: str = None):
+    result = get_dispatch_suggestions(start_date, status)
+    return JSONResponse(content=result)
+
+
+@app.post("/api/traffic/dispatch-execute/{suggestion_id}")
+async def api_execute_dispatch(suggestion_id: int):
+    result = execute_dispatch_suggestion(suggestion_id)
+    if not result["success"]:
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.post("/api/traffic/dispatch-dismiss/{suggestion_id}")
+async def api_dismiss_dispatch(suggestion_id: int):
+    result = dismiss_dispatch_suggestion(suggestion_id)
+    if not result["success"]:
+        return JSONResponse(content=result, status_code=400)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/traffic/comparison")
+async def api_get_comparison(start_date: str):
+    result = get_dispatch_comparison(start_date)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/traffic/overload-warnings")
+async def api_get_overload_warnings(start_date: str):
+    result = get_overload_warnings(start_date)
+    return JSONResponse(content=result)
+
+
+@app.delete("/api/traffic/history/{record_id}")
+async def api_delete_traffic_history(record_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM traffic_history WHERE id = ?", (record_id,))
+    conn.commit()
+    conn.close()
+    return JSONResponse(content={"success": True})

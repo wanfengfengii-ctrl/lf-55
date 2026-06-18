@@ -4,6 +4,16 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 
+_WEEKDAY_WEIGHTS = [0.85, 1.0, 1.0, 1.0, 1.0, 1.15, 1.10]
+
+_SUGGESTION_LABELS = {
+    "stagger_open": "分时开门",
+    "delay_close": "延后关门",
+    "temp_divert": "临时分流",
+    "gate_switch": "主副门切换",
+}
+
+
 def _time_to_minutes(t: str) -> int:
     parts = t.split(":")
     return int(parts[0]) * 60 + int(parts[1])
@@ -745,3 +755,480 @@ def get_linkage_weekly_comparison(start_date: str, strategy_id: int) -> dict:
         "with_linkage": with_linkage,
         "without_linkage": without_linkage,
     }
+
+
+def add_traffic_history(gate_id: int, record_date: str, time_period: str,
+                        volume: int, event_factor: float = 1.0, notes: str = "") -> dict:
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT OR REPLACE INTO traffic_history (gate_id, record_date, time_period, volume, event_factor, notes)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (gate_id, record_date, time_period, volume, event_factor, notes),
+        )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return {"success": False, "error": str(e)}
+    conn.close()
+    return {"success": True}
+
+
+def batch_add_traffic_history(records: list[dict]) -> dict:
+    conn = get_db()
+    try:
+        for r in records:
+            conn.execute(
+                """INSERT OR REPLACE INTO traffic_history (gate_id, record_date, time_period, volume, event_factor, notes)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (r["gate_id"], r["record_date"], r["time_period"],
+                 r.get("volume", 0), r.get("event_factor", 1.0), r.get("notes", "")),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return {"success": False, "error": str(e)}
+    conn.close()
+    return {"success": True, "count": len(records)}
+
+
+def get_traffic_history(gate_id: int = None, start_date: str = None,
+                        end_date: str = None, time_period: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT th.*, g.gate_name, g.gate_code FROM traffic_history th
+               JOIN gates g ON th.gate_id = g.id WHERE 1=1"""
+    params = []
+    if gate_id is not None:
+        query += " AND th.gate_id = ?"
+        params.append(gate_id)
+    if start_date:
+        query += " AND th.record_date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND th.record_date <= ?"
+        params.append(end_date)
+    if time_period:
+        query += " AND th.time_period = ?"
+        params.append(time_period)
+    query += " ORDER BY th.record_date DESC, th.gate_id"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def predict_traffic_for_week(start_date: str) -> dict:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates").fetchall()
+
+    history_start = (base - timedelta(days=28)).strftime("%Y-%m-%d")
+    history_end = (base - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    predictions = []
+    for gate in gates:
+        gate_id = gate["id"]
+        capacity = gate["capacity"] if gate["capacity"] else 500
+        peak_capacity = gate["peak_capacity"] if gate["peak_capacity"] else 200
+
+        for period in ["morning_peak", "evening_peak"]:
+            rows = conn.execute(
+                """SELECT record_date, volume, event_factor FROM traffic_history
+                   WHERE gate_id = ? AND time_period = ? AND record_date >= ? AND record_date <= ?
+                   ORDER BY record_date""",
+                (gate_id, period, history_start, history_end),
+            ).fetchall()
+
+            if not rows:
+                base_volume = peak_capacity
+                confidence = 0.3
+            else:
+                volumes = [r["volume"] for r in rows]
+                factors = [r["event_factor"] for r in rows]
+                adjusted = [v / f if f > 0 else v for v, f in zip(volumes, factors)]
+                recent = adjusted[-7:] if len(adjusted) >= 7 else adjusted
+                older = adjusted[:-7] if len(adjusted) > 7 else []
+                if older:
+                    base_volume = sum(recent) * 0.7 / len(recent) + sum(older) * 0.3 / len(older)
+                else:
+                    base_volume = sum(recent) / len(recent)
+                confidence = min(0.95, 0.5 + 0.1 * min(len(rows), 5))
+
+            for i, date_str in enumerate(dates):
+                dt = datetime.strptime(date_str, "%Y-%m-%d")
+                weekday = dt.weekday()
+                weekday_weight = _WEEKDAY_WEIGHTS[weekday]
+                predicted_volume = int(base_volume * weekday_weight)
+                overload_ratio = predicted_volume / peak_capacity if peak_capacity > 0 else 0
+                is_overload = 1 if overload_ratio > 1.0 else 0
+
+                conn.execute(
+                    """INSERT OR REPLACE INTO traffic_predictions
+                       (gate_id, predict_date, time_period, predicted_volume, confidence,
+                        gate_capacity, overload_ratio, is_overload)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (gate_id, date_str, period, predicted_volume, round(confidence, 2),
+                     peak_capacity, round(overload_ratio, 2), is_overload),
+                )
+                predictions.append({
+                    "gate_id": gate_id,
+                    "gate_name": gate["gate_name"],
+                    "gate_code": gate["gate_code"],
+                    "predict_date": date_str,
+                    "time_period": period,
+                    "predicted_volume": predicted_volume,
+                    "confidence": round(confidence, 2),
+                    "gate_capacity": peak_capacity,
+                    "overload_ratio": round(overload_ratio, 2),
+                    "is_overload": is_overload,
+                })
+
+    conn.commit()
+    conn.close()
+    _generate_dispatch_suggestions(start_date)
+    return {"dates": dates, "predictions": predictions}
+
+
+def _generate_dispatch_suggestions(start_date: str) -> list[dict]:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates").fetchall()
+    suggestions = []
+
+    for gate in gates:
+        gate_id = gate["id"]
+        gate_name = gate["gate_name"]
+        is_main = gate["is_main"]
+        peak_capacity = gate["peak_capacity"] if gate["peak_capacity"] else 200
+
+        for date_str in dates:
+            overload_preds = conn.execute(
+                """SELECT * FROM traffic_predictions
+                   WHERE gate_id = ? AND predict_date = ? AND is_overload = 1""",
+                (gate_id, date_str),
+            ).fetchall()
+
+            if not overload_preds:
+                continue
+
+            for pred in overload_preds:
+                period = pred["time_period"]
+                pred_vol = pred["predicted_volume"]
+                overload_ratio = pred["overload_ratio"]
+                period_label = "早高峰" if period == "morning_peak" else "晚高峰"
+
+                existing = conn.execute(
+                    """SELECT id FROM dispatch_suggestions
+                       WHERE gate_id = ? AND suggest_date = ? AND suggestion_type = ? AND status = 'pending'""",
+                    (gate_id, date_str, "stagger_open"),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """INSERT INTO dispatch_suggestions
+                           (gate_id, suggest_date, time_period, suggestion_type, description, detail, status, before_volume, after_volume)
+                           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                        (gate_id, date_str, period, "stagger_open",
+                         f"{gate_name} {date_str} {period_label} 预测流量{pred_vol}人，超出容量{int((overload_ratio - 1) * 100)}%，建议分时开门缓解",
+                         f"将开门时间提前30分钟，分批放行，预计降至{int(pred_vol * 0.75)}人",
+                         pred_vol, int(pred_vol * 0.75)),
+                    )
+                    suggestions.append({"gate_name": gate_name, "date": date_str,
+                                        "type": "stagger_open", "period": period_label})
+
+                existing = conn.execute(
+                    """SELECT id FROM dispatch_suggestions
+                       WHERE gate_id = ? AND suggest_date = ? AND suggestion_type = ? AND status = 'pending'""",
+                    (gate_id, date_str, "delay_close"),
+                ).fetchone()
+                if not existing:
+                    conn.execute(
+                        """INSERT INTO dispatch_suggestions
+                           (gate_id, suggest_date, time_period, suggestion_type, description, detail, status, before_volume, after_volume)
+                           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                        (gate_id, date_str, period, "delay_close",
+                         f"{gate_name} {date_str} {period_label} 预测流量{pred_vol}人，建议延后关门30分钟疏散人群",
+                         f"延迟关门至原定时间后30分钟，预计疏散流量{int(pred_vol * 0.2)}人",
+                         pred_vol, int(pred_vol * 0.8)),
+                    )
+                    suggestions.append({"gate_name": gate_name, "date": date_str,
+                                        "type": "delay_close", "period": period_label})
+
+                if overload_ratio > 1.3:
+                    existing = conn.execute(
+                        """SELECT id FROM dispatch_suggestions
+                           WHERE gate_id = ? AND suggest_date = ? AND suggestion_type = ? AND status = 'pending'""",
+                        (gate_id, date_str, "temp_divert"),
+                    ).fetchone()
+                    if not existing:
+                        conn.execute(
+                            """INSERT INTO dispatch_suggestions
+                               (gate_id, suggest_date, time_period, suggestion_type, description, detail, status, before_volume, after_volume)
+                               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                            (gate_id, date_str, period, "temp_divert",
+                             f"{gate_name} {date_str} {period_label} 严重超负荷({int(overload_ratio * 100)}%)，建议临时分流至邻近城门",
+                             f"引导{int(pred_vol * 0.3)}人分流至邻近城门，本门降至{int(pred_vol * 0.7)}人",
+                             pred_vol, int(pred_vol * 0.7)),
+                        )
+                        suggestions.append({"gate_name": gate_name, "date": date_str,
+                                            "type": "temp_divert", "period": period_label})
+
+                if overload_ratio > 1.5 and is_main:
+                    existing = conn.execute(
+                        """SELECT id FROM dispatch_suggestions
+                           WHERE gate_id = ? AND suggest_date = ? AND suggestion_type = ? AND status = 'pending'""",
+                        (gate_id, date_str, "gate_switch"),
+                    ).fetchone()
+                    if not existing:
+                        nearby = conn.execute(
+                            """SELECT gate_name FROM gates WHERE direction = (SELECT direction FROM gates WHERE id = ?) AND id != ? AND is_main = 0 LIMIT 1""",
+                            (gate_id, gate_id),
+                        ).fetchone()
+                        nearby_name = nearby["gate_name"] if nearby else "副门"
+                        conn.execute(
+                            """INSERT INTO dispatch_suggestions
+                               (gate_id, suggest_date, time_period, suggestion_type, description, detail, status, before_volume, after_volume)
+                               VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                            (gate_id, date_str, period, "gate_switch",
+                             f"{gate_name} {date_str} {period_label} 极度超负荷({int(overload_ratio * 100)}%)，建议切换至{nearby_name}作为主通行门",
+                             f"将主通行功能切换至{nearby_name}，分流{int(pred_vol * 0.5)}人，本门降至{int(pred_vol * 0.5)}人",
+                             pred_vol, int(pred_vol * 0.5)),
+                        )
+                        suggestions.append({"gate_name": gate_name, "date": date_str,
+                                            "type": "gate_switch", "period": period_label})
+
+    conn.commit()
+    conn.close()
+    return suggestions
+
+
+def get_traffic_predictions(start_date: str) -> dict:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+
+    result = {"dates": dates, "gates": []}
+    for gate in gates:
+        gate_data = {
+            "gate_name": gate["gate_name"],
+            "gate_code": gate["gate_code"],
+            "is_main": gate["is_main"],
+            "peak_capacity": gate["peak_capacity"] if gate["peak_capacity"] else 200,
+            "morning_peak": [],
+            "evening_peak": [],
+        }
+        for d in dates:
+            for period in ["morning_peak", "evening_peak"]:
+                row = conn.execute(
+                    """SELECT * FROM traffic_predictions
+                       WHERE gate_id = ? AND predict_date = ? AND time_period = ?""",
+                    (gate["id"], d, period),
+                ).fetchone()
+                if row:
+                    gate_data[period].append({
+                        "date": d,
+                        "predicted_volume": row["predicted_volume"],
+                        "confidence": row["confidence"],
+                        "overload_ratio": row["overload_ratio"],
+                        "is_overload": row["is_overload"],
+                    })
+                else:
+                    gate_data[period].append({
+                        "date": d,
+                        "predicted_volume": 0,
+                        "confidence": 0,
+                        "overload_ratio": 0,
+                        "is_overload": 0,
+                    })
+        result["gates"].append(gate_data)
+
+    conn.close()
+    return result
+
+
+def get_dispatch_suggestions(start_date: str = None, status: str = None) -> list[dict]:
+    conn = get_db()
+    query = """SELECT ds.*, g.gate_name, g.gate_code, g.is_main FROM dispatch_suggestions ds
+               JOIN gates g ON ds.gate_id = g.id WHERE 1=1"""
+    params = []
+    if start_date:
+        base = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date = (base + timedelta(days=6)).strftime("%Y-%m-%d")
+        query += " AND ds.suggest_date >= ? AND ds.suggest_date <= ?"
+        params.extend([start_date, end_date])
+    if status:
+        query += " AND ds.status = ?"
+        params.append(status)
+    query += " ORDER BY ds.suggest_date, ds.gate_id, ds.suggestion_type"
+    rows = conn.execute(query, params).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["suggestion_label"] = _SUGGESTION_LABELS.get(d["suggestion_type"], d["suggestion_type"])
+        result.append(d)
+    conn.close()
+    return result
+
+
+def execute_dispatch_suggestion(suggestion_id: int) -> dict:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM dispatch_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+    if not row:
+        conn.close()
+        return {"success": False, "error": "调度建议不存在"}
+    if row["status"] != "pending":
+        conn.close()
+        return {"success": False, "error": f"该建议状态为{row['status']}，无法执行"}
+
+    conn.execute("UPDATE dispatch_suggestions SET status = 'executed' WHERE id = ?", (suggestion_id,))
+
+    gate_id = row["gate_id"]
+    suggest_date = row["suggest_date"]
+    suggestion_type = row["suggestion_type"]
+    detail = row["detail"]
+
+    if suggestion_type == "stagger_open":
+        schedule_row = conn.execute(
+            """SELECT id, open_time FROM schedules
+               WHERE gate_id = ? AND schedule_date = ? AND scheme_type = 'final'""",
+            (gate_id, suggest_date),
+        ).fetchone()
+        if schedule_row:
+            new_open = _sub_minutes(schedule_row["open_time"], 30)
+            conn.execute(
+                "UPDATE schedules SET open_time = ? WHERE id = ?",
+                (new_open, schedule_row["id"]),
+            )
+
+    elif suggestion_type == "delay_close":
+        schedule_row = conn.execute(
+            """SELECT id, close_time FROM schedules
+               WHERE gate_id = ? AND schedule_date = ? AND scheme_type = 'final'""",
+            (gate_id, suggest_date),
+        ).fetchone()
+        if schedule_row:
+            new_close = _add_minutes(schedule_row["close_time"], 30)
+            conn.execute(
+                "UPDATE schedules SET close_time = ? WHERE id = ?",
+                (new_close, schedule_row["id"]),
+            )
+
+    elif suggestion_type in ("temp_divert", "gate_switch"):
+        order_name = f"流量调度-{row['suggestion_type']}-{suggest_date}"
+        existing = conn.execute(
+            "SELECT id FROM temp_control_orders WHERE order_name = ?", (order_name,),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                """INSERT INTO temp_control_orders
+                   (order_name, start_date, end_date, time_start, time_end,
+                    action_type, forced_open_time, forced_close_time, priority, override_reason, is_active)
+                   VALUES (?, ?, ?, '00:00', '23:59', 'restrict_hours', ?, ?, 15, ?, 1)""",
+                (order_name, suggest_date, suggest_date,
+                 "05:30", "21:00" if suggestion_type == "temp_divert" else "22:00",
+                 f"流量预测调度：{detail}"),
+            )
+            order_id = conn.last_insert_rowid
+            conn.execute(
+                "INSERT OR IGNORE INTO temp_control_gates (order_id, gate_id) VALUES (?, ?)",
+                (order_id, gate_id),
+            )
+            if suggestion_type == "gate_switch":
+                alt_gate = conn.execute(
+                    """SELECT id FROM gates WHERE direction = (SELECT direction FROM gates WHERE id = ?)
+                       AND id != ? AND is_main = 0 LIMIT 1""",
+                    (gate_id, gate_id),
+                ).fetchone()
+                if alt_gate:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO temp_control_gates (order_id, gate_id) VALUES (?, ?)",
+                        (order_id, alt_gate["id"]),
+                    )
+
+    conn.commit()
+    conn.close()
+    recalculate_schedules_for_date_range(suggest_date)
+    return {"success": True}
+
+
+def dismiss_dispatch_suggestion(suggestion_id: int) -> dict:
+    conn = get_db()
+    row = conn.execute("SELECT * FROM dispatch_suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+    if not row:
+        conn.close()
+        return {"success": False, "error": "调度建议不存在"}
+    conn.execute("UPDATE dispatch_suggestions SET status = 'dismissed' WHERE id = ?", (suggestion_id,))
+    conn.commit()
+    conn.close()
+    return {"success": True}
+
+
+def get_dispatch_comparison(start_date: str) -> dict:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+
+    result = {"dates": dates, "gates": []}
+    for gate in gates:
+        gate_data = {
+            "gate_name": gate["gate_name"],
+            "gate_code": gate["gate_code"],
+            "peak_capacity": gate["peak_capacity"] if gate["peak_capacity"] else 200,
+            "before": {"morning_peak": [], "evening_peak": []},
+            "after": {"morning_peak": [], "evening_peak": []},
+        }
+        for d in dates:
+            for period in ["morning_peak", "evening_peak"]:
+                pred = conn.execute(
+                    """SELECT predicted_volume FROM traffic_predictions
+                       WHERE gate_id = ? AND predict_date = ? AND time_period = ?""",
+                    (gate["id"], d, period),
+                ).fetchone()
+                before_vol = pred["predicted_volume"] if pred else 0
+
+                suggestions = conn.execute(
+                    """SELECT after_volume FROM dispatch_suggestions
+                       WHERE gate_id = ? AND suggest_date = ? AND time_period = ? AND status = 'executed'""",
+                    (gate["id"], d, period),
+                ).fetchall()
+                after_vol = before_vol
+                if suggestions:
+                    min_after = min(s["after_volume"] for s in suggestions)
+                    after_vol = min_after
+
+                gate_data["before"][period].append(before_vol)
+                gate_data["after"][period].append(after_vol)
+
+        result["gates"].append(gate_data)
+
+    conn.close()
+    return result
+
+
+def get_overload_warnings(start_date: str) -> list[dict]:
+    base = datetime.strptime(start_date, "%Y-%m-%d")
+    dates = [(base + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7)]
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT tp.*, g.gate_name, g.gate_code, g.is_main FROM traffic_predictions tp
+           JOIN gates g ON tp.gate_id = g.id
+           WHERE tp.is_overload = 1 AND tp.predict_date >= ? AND tp.predict_date <= ?
+           ORDER BY tp.overload_ratio DESC""",
+        (dates[0], dates[-1]),
+    ).fetchall()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["period_label"] = "早高峰" if d["time_period"] == "morning_peak" else "晚高峰"
+        d["overload_pct"] = int((d["overload_ratio"] - 1) * 100)
+        pending = conn.execute(
+            """SELECT suggestion_type, description FROM dispatch_suggestions
+               WHERE gate_id = ? AND suggest_date = ? AND status = 'pending'""",
+            (d["gate_id"], d["predict_date"]),
+        ).fetchall()
+        d["pending_suggestions"] = [_SUGGESTION_LABELS.get(p["suggestion_type"], p["suggestion_type"]) for p in pending]
+        result.append(d)
+    conn.close()
+    return result

@@ -168,6 +168,65 @@ def init_db():
         )
     """)
 
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS traffic_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id INTEGER NOT NULL,
+            record_date TEXT NOT NULL,
+            time_period TEXT NOT NULL CHECK(time_period IN ('morning_peak','evening_peak')),
+            volume INTEGER NOT NULL DEFAULT 0,
+            event_factor REAL NOT NULL DEFAULT 1.0,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            UNIQUE(gate_id, record_date, time_period)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS traffic_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id INTEGER NOT NULL,
+            predict_date TEXT NOT NULL,
+            time_period TEXT NOT NULL CHECK(time_period IN ('morning_peak','evening_peak')),
+            predicted_volume INTEGER NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0.0,
+            gate_capacity INTEGER NOT NULL DEFAULT 0,
+            overload_ratio REAL NOT NULL DEFAULT 0.0,
+            is_overload INTEGER NOT NULL DEFAULT 0 CHECK(is_overload IN (0,1)),
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            UNIQUE(gate_id, predict_date, time_period)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS dispatch_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            gate_id INTEGER NOT NULL,
+            suggest_date TEXT NOT NULL,
+            time_period TEXT NOT NULL DEFAULT 'morning_peak' CHECK(time_period IN ('morning_peak','evening_peak')),
+            suggestion_type TEXT NOT NULL CHECK(suggestion_type IN ('stagger_open','delay_close','temp_divert','gate_switch')),
+            description TEXT NOT NULL DEFAULT '',
+            detail TEXT DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','executed','dismissed')),
+            before_volume INTEGER DEFAULT 0,
+            after_volume INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE
+        )
+    """)
+
+    try:
+        c.execute("ALTER TABLE gates ADD COLUMN capacity INTEGER NOT NULL DEFAULT 500")
+    except Exception:
+        pass
+
+    try:
+        c.execute("ALTER TABLE gates ADD COLUMN peak_capacity INTEGER NOT NULL DEFAULT 200")
+    except Exception:
+        pass
+
     try:
         c.execute("ALTER TABLE schedules ADD COLUMN rule_chain TEXT DEFAULT ''")
     except Exception:

@@ -1,0 +1,472 @@
+{% extends "base.html" %}
+{% block title %}通行流量预测与拥堵调度 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>通行流量预测与拥堵调度</h1>
+</div>
+
+<div class="card">
+    <h2>录入历史通行量</h2>
+    <div class="form-grid" style="grid-template-columns: 200px 200px 200px 150px 150px auto;">
+        <div class="form-group">
+            <label>城门</label>
+            <select id="histGateSelect">
+                {% for g in gates %}
+                <option value="{{ g.id }}">{{ g.gate_name }} ({{ g.gate_code }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>日期</label>
+            <input type="date" id="histDate">
+        </div>
+        <div class="form-group">
+            <label>时段</label>
+            <select id="histPeriod">
+                <option value="morning_peak">早高峰</option>
+                <option value="evening_peak">晚高峰</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>通行量（人）</label>
+            <input type="number" id="histVolume" min="0" value="150">
+        </div>
+        <div class="form-group">
+            <label>事件影响因子</label>
+            <input type="number" id="histEventFactor" min="0.1" step="0.1" value="1.0">
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-primary" onclick="addHistoryRecord()">录入</button>
+        </div>
+    </div>
+    <div style="margin-top:0.75rem;">
+        <button type="button" class="btn btn-success btn-sm" onclick="loadSampleHistory()">载入示例数据</button>
+    </div>
+    <div id="historyTableContainer" style="margin-top:1rem;max-height:300px;overflow-y:auto;"></div>
+</div>
+
+<div class="card">
+    <h2>生成预测</h2>
+    <div class="form-grid" style="grid-template-columns: 200px auto;">
+        <div class="form-group">
+            <label>预测起始日期（预测一周）</label>
+            <input type="date" id="predictStartDate" value="{{ start_date }}">
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-primary" onclick="runPrediction()">生成流量预测</button>
+        </div>
+    </div>
+</div>
+
+<div id="overloadWarningPanel" class="card" style="display:none;border-color:var(--accent-red);">
+    <h2 style="color:var(--accent-red);">⚠ 超负荷预警</h2>
+    <div id="overloadWarningList"></div>
+</div>
+
+<div class="card">
+    <h2>预测流量曲线</h2>
+    <div class="form-grid" style="grid-template-columns: 200px auto;margin-bottom:1rem;">
+        <div class="form-group">
+            <label>选择城门</label>
+            <select id="predictGateSelect" onchange="renderPredictionChart()">
+                {% for g in gates %}
+                <option value="{{ g.id }}">{{ g.gate_name }} ({{ g.gate_code }})</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div id="predictionChart" style="min-height:450px;"></div>
+</div>
+
+<div class="card">
+    <h2>调度建议</h2>
+    <div class="form-grid" style="grid-template-columns: 200px 200px auto;margin-bottom:1rem;">
+        <div class="form-group">
+            <label>起始日期</label>
+            <input type="date" id="dispatchStartDate" value="{{ start_date }}">
+        </div>
+        <div class="form-group">
+            <label>状态筛选</label>
+            <select id="dispatchStatusFilter" onchange="loadDispatchSuggestions()">
+                <option value="">全部</option>
+                <option value="pending" selected>待处理</option>
+                <option value="executed">已执行</option>
+                <option value="dismissed">已忽略</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-primary" onclick="loadDispatchSuggestions()">刷新建议</button>
+        </div>
+    </div>
+    <div id="dispatchSuggestionsList"></div>
+</div>
+
+<div class="card">
+    <h2>执行前后对比</h2>
+    <div class="form-grid" style="grid-template-columns: 200px auto;margin-bottom:1rem;">
+        <div class="form-group">
+            <label>选择城门</label>
+            <select id="comparisonPredictGateSelect" onchange="renderComparisonChart()">
+                {% for g in gates %}
+                <option value="{{ g.id }}">{{ g.gate_name }} ({{ g.gate_code }})</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div id="dispatchComparisonChart" style="min-height:400px;"></div>
+</div>
+
+<div class="card">
+    <h2>预测详情一览</h2>
+    <div class="table-responsive">
+        <table id="predictionDetailTable">
+            <thead>
+                <tr id="predictionDetailHeader"></tr>
+            </thead>
+            <tbody id="predictionDetailBody"></tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let predictionData = null;
+let currentPredictGateId = null;
+let currentComparisonGateId = null;
+
+function addHistoryRecord() {
+    const gateId = parseInt(document.getElementById('histGateSelect').value);
+    const date = document.getElementById('histDate').value;
+    const period = document.getElementById('histPeriod').value;
+    const volume = parseInt(document.getElementById('histVolume').value);
+    const eventFactor = parseFloat(document.getElementById('histEventFactor').value);
+    if (!date) { showToast('请选择日期', 'error'); return; }
+    if (isNaN(volume) || volume < 0) { showToast('请输入有效通行量', 'error'); return; }
+    if (isNaN(eventFactor) || eventFactor <= 0) { showToast('事件影响因子须大于0', 'error'); return; }
+    const records = [{ gate_id: gateId, record_date: date, time_period: period, volume: volume, event_factor: eventFactor }];
+    fetch('/api/traffic/history', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ records }) })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) { showToast('录入成功', 'success'); loadHistoryTable(); }
+            else { showToast(data.error || '录入失败', 'error'); }
+        })
+        .catch(() => showToast('录入失败', 'error'));
+}
+
+function loadSampleHistory() {
+    const today = new Date();
+    const records = [];
+    const gates = [{% for g in gates %}{id:{{ g.id }},name:'{{ g.gate_name }}'},{% endfor %}];
+    gates.forEach(g => {
+        for (let i = 28; i >= 1; i--) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            const dateStr = d.toISOString().slice(0, 10);
+            const isWeekend = d.getDay() === 0 || d.getDay() === 6;
+            const baseMorning = g.id % 2 === 0 ? 160 : 180;
+            const baseEvening = g.id % 2 === 0 ? 140 : 200;
+            const weekendBoost = isWeekend ? 1.2 : 1.0;
+            const variance = () => 0.85 + Math.random() * 0.3;
+            records.push({ gate_id: g.id, record_date: dateStr, time_period: 'morning_peak', volume: Math.round(baseMorning * weekendBoost * variance()), event_factor: 1.0 });
+            records.push({ gate_id: g.id, record_date: dateStr, time_period: 'evening_peak', volume: Math.round(baseEvening * weekendBoost * variance()), event_factor: 1.0 });
+        }
+    });
+    fetch('/api/traffic/history', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ records }) })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) { showToast(`已载入${data.count}条示例数据`, 'success'); loadHistoryTable(); }
+            else { showToast(data.error || '载入失败', 'error'); }
+        })
+        .catch(() => showToast('载入失败', 'error'));
+}
+
+function loadHistoryTable() {
+    const endDate = new Date().toISOString().slice(0, 10);
+    const startDate = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    fetch(`/api/traffic/history?start_date=${startDate}&end_date=${endDate}`)
+        .then(r => r.json())
+        .then(data => {
+            const container = document.getElementById('historyTableContainer');
+            if (!data.length) { container.innerHTML = '<p style="color:var(--text-secondary);">暂无历史数据</p>'; return; }
+            let html = '<table><thead><tr><th>城门</th><th>日期</th><th>时段</th><th>通行量</th><th>事件因子</th><th>操作</th></tr></thead><tbody>';
+            data.slice(0, 50).forEach(r => {
+                const periodLabel = r.time_period === 'morning_peak' ? '早高峰' : '晚高峰';
+                html += `<tr><td>${r.gate_name}</td><td>${r.record_date}</td><td>${periodLabel}</td><td>${r.volume}</td><td>${r.event_factor}</td>
+                    <td><button class="btn btn-danger btn-sm" onclick="deleteHistoryRecord(${r.id})">删除</button></td></tr>`;
+            });
+            html += '</tbody></table>';
+            if (data.length > 50) html += `<p style="color:var(--text-secondary);margin-top:0.5rem;">仅显示最近50条（共${data.length}条）</p>`;
+            container.innerHTML = html;
+        })
+        .catch(() => {});
+}
+
+function deleteHistoryRecord(id) {
+    fetch(`/api/traffic/history/${id}`, { method: 'DELETE' })
+        .then(r => r.json())
+        .then(() => { showToast('已删除', 'success'); loadHistoryTable(); })
+        .catch(() => showToast('删除失败', 'error'));
+}
+
+function runPrediction() {
+    const startDate = document.getElementById('predictStartDate').value;
+    if (!startDate) { showToast('请选择起始日期', 'error'); return; }
+    fetch('/api/traffic/predict', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ start_date: startDate }) })
+        .then(r => r.json())
+        .then(data => {
+            showToast('预测已生成', 'success');
+            loadPredictions(startDate);
+            loadOverloadWarnings(startDate);
+            loadDispatchSuggestions();
+        })
+        .catch(() => showToast('预测失败', 'error'));
+}
+
+function loadPredictions(startDate) {
+    fetch(`/api/traffic/predictions?start_date=${startDate}`)
+        .then(r => r.json())
+        .then(data => {
+            predictionData = data;
+            renderPredictionChart();
+            renderPredictionDetailTable();
+        })
+        .catch(() => {});
+}
+
+function loadOverloadWarnings(startDate) {
+    fetch(`/api/traffic/overload-warnings?start_date=${startDate}`)
+        .then(r => r.json())
+        .then(data => {
+            const panel = document.getElementById('overloadWarningPanel');
+            const list = document.getElementById('overloadWarningList');
+            if (!data.length) { panel.style.display = 'none'; return; }
+            panel.style.display = '';
+            let html = '';
+            data.forEach(w => {
+                const severity = w.overload_ratio > 1.5 ? 'alert-danger' : 'alert-warning';
+                const severityIcon = w.overload_ratio > 1.5 ? '🔴' : '🟡';
+                html += `<div class="alert ${severity}" style="margin-bottom:0.5rem;">
+                    ${severityIcon} <strong>${w.gate_name}</strong> ${w.predict_date} ${w.period_label}
+                    预测流量${w.predicted_volume}人，超容量${w.overload_pct}%
+                    <small style="color:var(--text-secondary);">（可调度：${w.pending_suggestions.join('、') || '无'}）</small>
+                </div>`;
+            });
+            list.innerHTML = html;
+        })
+        .catch(() => {});
+}
+
+function renderPredictionChart() {
+    if (!predictionData || !predictionData.gates.length) return;
+    const sel = document.getElementById('predictGateSelect');
+    currentPredictGateId = parseInt(sel.value);
+    const gate = predictionData.gates.find(g => parseInt(sel.value) === currentPredictGateId) || predictionData.gates[0];
+    if (!gate) return;
+
+    const dates = predictionData.dates.map(d => d.slice(5));
+    const traces = [];
+    const morningY = gate.morning_peak.map(p => p.predicted_volume);
+    const eveningY = gate.evening_peak.map(p => p.predicted_volume);
+    const capacityLine = Array(7).fill(gate.peak_capacity);
+
+    traces.push({
+        x: dates, y: morningY, name: '早高峰预测',
+        type: 'scatter', mode: 'lines+markers',
+        line: { color: '#e67e22', width: 3 }, marker: { size: 8 },
+        fill: 'tozeroy', fillcolor: 'rgba(230,126,34,0.1)',
+    });
+    traces.push({
+        x: dates, y: eveningY, name: '晚高峰预测',
+        type: 'scatter', mode: 'lines+markers',
+        line: { color: '#9b59b6', width: 3 }, marker: { size: 8 },
+        fill: 'tozeroy', fillcolor: 'rgba(155,89,182,0.1)',
+    });
+    traces.push({
+        x: dates, y: capacityLine, name: '容量上限',
+        type: 'scatter', mode: 'lines',
+        line: { color: '#c0392b', width: 2, dash: 'dash' },
+    });
+
+    const morningOverload = gate.morning_peak.map(p => p.is_overload ? p.predicted_volume : null);
+    const eveningOverload = gate.evening_peak.map(p => p.is_overload ? p.predicted_volume : null);
+    traces.push({
+        x: dates, y: morningOverload, name: '早高峰超负荷',
+        type: 'scatter', mode: 'markers',
+        marker: { color: '#c0392b', size: 14, symbol: 'x', line: { width: 3 } },
+    });
+    traces.push({
+        x: dates, y: eveningOverload, name: '晚高峰超负荷',
+        type: 'scatter', mode: 'markers',
+        marker: { color: '#c0392b', size: 14, symbol: 'triangle-up', line: { width: 3 } },
+    });
+
+    const layout = {
+        title: { text: `${gate.gate_name} 一周高峰流量预测`, font: { color: '#c9a84c', size: 16 } },
+        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#a89b8c' },
+        xaxis: { title: '日期', gridcolor: '#2c3e6b' },
+        yaxis: { title: '通行量（人）', gridcolor: '#2c3e6b' },
+        legend: { orientation: 'h', y: -0.2 },
+        margin: { l: 60, r: 30, t: 40, b: 80 },
+        height: 420,
+        shapes: [{
+            type: 'rect', x0: 0, x1: 1, y0: gate.peak_capacity, y1: 9999,
+            xref: 'paper', fillcolor: 'rgba(192,57,43,0.05)', line: { width: 0 },
+        }],
+    };
+    Plotly.newPlot('predictionChart', traces, layout, { responsive: true });
+}
+
+function renderPredictionDetailTable() {
+    if (!predictionData || !predictionData.gates.length) return;
+    const dates = predictionData.dates;
+    let headerHtml = '<th>城门</th><th>时段</th>';
+    dates.forEach(d => {
+        const dayName = new Date(d + 'T00:00:00').toLocaleDateString('zh-CN', { weekday: 'short' });
+        headerHtml += `<th>${d.slice(5)}<br><small>${dayName}</small></th>`;
+    });
+    document.getElementById('predictionDetailHeader').innerHTML = headerHtml;
+
+    let bodyHtml = '';
+    predictionData.gates.forEach(gate => {
+        ['morning_peak', 'evening_peak'].forEach(period => {
+            const label = period === 'morning_peak' ? '早高峰' : '晚高峰';
+            bodyHtml += `<tr><td><strong>${gate.gate_name}</strong></td><td>${label}</td>`;
+            gate[period].forEach(p => {
+                const isOver = p.is_overload;
+                const style = isOver ? 'background:rgba(192,57,43,0.15);color:var(--accent-red);font-weight:bold;' : '';
+                const icon = isOver ? ' ⚠' : '';
+                bodyHtml += `<td style="${style}">${p.predicted_volume}${icon}<br><small style="color:var(--text-secondary);">${Math.round(p.confidence * 100)}%</small></td>`;
+            });
+            bodyHtml += '</tr>';
+        });
+    });
+    document.getElementById('predictionDetailBody').innerHTML = bodyHtml;
+}
+
+function loadDispatchSuggestions() {
+    const startDate = document.getElementById('dispatchStartDate').value;
+    const status = document.getElementById('dispatchStatusFilter').value;
+    let url = '/api/traffic/dispatch-suggestions?';
+    if (startDate) url += `start_date=${startDate}&`;
+    if (status) url += `status=${status}`;
+    fetch(url)
+        .then(r => r.json())
+        .then(data => {
+            const container = document.getElementById('dispatchSuggestionsList');
+            if (!data.length) { container.innerHTML = '<p style="color:var(--text-secondary);">暂无调度建议</p>'; return; }
+            let html = '';
+            data.forEach(s => {
+                const typeColors = { stagger_open: 'badge-gold', delay_close: 'badge-blue', temp_divert: 'badge-orange', gate_switch: 'badge-purple' };
+                const statusColors = { pending: 'badge-orange', executed: 'badge-green', dismissed: 'badge-secondary' };
+                const statusLabels = { pending: '待处理', executed: '已执行', dismissed: '已忽略' };
+                const badge = `<span class="badge ${typeColors[s.suggestion_type] || 'badge-gold'}">${s.suggestion_label}</span>`;
+                const statusBadge = `<span class="badge ${statusColors[s.status] || 'badge-green'}">${statusLabels[s.status] || s.status}</span>`;
+                const actions = s.status === 'pending'
+                    ? `<button class="btn btn-success btn-sm" onclick="executeDispatch(${s.id})" style="margin-right:0.5rem;">执行</button>
+                       <button class="btn btn-danger btn-sm" onclick="dismissDispatch(${s.id})">忽略</button>`
+                    : '';
+                html += `<div class="dispatch-suggestion-item" style="padding:0.75rem;border:1px solid var(--border-color);border-radius:var(--radius);margin-bottom:0.5rem;${s.status === 'pending' ? 'border-left:4px solid var(--accent-orange);' : ''}">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem;">
+                        <div>${badge} <strong>${s.gate_name}</strong> ${s.suggest_date} ${statusBadge}</div>
+                        <div>${actions}</div>
+                    </div>
+                    <div style="font-size:0.9rem;color:var(--text-primary);margin-bottom:0.25rem;">${s.description}</div>
+                    ${s.detail ? `<div style="font-size:0.85rem;color:var(--accent-blue);">💡 ${s.detail}</div>` : ''}
+                    ${s.before_volume ? `<div style="font-size:0.8rem;color:var(--text-secondary);margin-top:0.25rem;">流量：${s.before_volume} → ${s.after_volume}人（降幅${Math.round((1 - s.after_volume / s.before_volume) * 100)}%）</div>` : ''}
+                </div>`;
+            });
+            container.innerHTML = html;
+        })
+        .catch(() => {});
+}
+
+function executeDispatch(id) {
+    fetch(`/api/traffic/dispatch-execute/${id}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) { showToast('调度建议已执行', 'success'); loadDispatchSuggestions(); loadComparisonChart(); }
+            else { showToast(data.error || '执行失败', 'error'); }
+        })
+        .catch(() => showToast('执行失败', 'error'));
+}
+
+function dismissDispatch(id) {
+    fetch(`/api/traffic/dispatch-dismiss/${id}`, { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) { showToast('已忽略', 'success'); loadDispatchSuggestions(); }
+            else { showToast(data.error || '操作失败', 'error'); }
+        })
+        .catch(() => showToast('操作失败', 'error'));
+}
+
+function loadComparisonChart() {
+    const startDate = document.getElementById('predictStartDate').value;
+    if (!startDate) return;
+    fetch(`/api/traffic/comparison?start_date=${startDate}`)
+        .then(r => r.json())
+        .then(data => { window._comparisonData = data; renderComparisonChart(); })
+        .catch(() => {});
+}
+
+function renderComparisonChart() {
+    const data = window._comparisonData;
+    if (!data || !data.gates.length) return;
+    const sel = document.getElementById('comparisonPredictGateSelect');
+    const gateIdx = parseInt(sel.selectedIndex);
+    const gate = data.gates[gateIdx] || data.gates[0];
+    if (!gate) return;
+
+    const dates = data.dates.map(d => d.slice(5));
+    const traces = [];
+    ['morning_peak', 'evening_peak'].forEach(period => {
+        const label = period === 'morning_peak' ? '早高峰' : '晚高峰';
+        const beforeColor = period === 'morning_peak' ? '#e67e22' : '#9b59b6';
+        const afterColor = period === 'morning_peak' ? '#27ae60' : '#2ecc71';
+        traces.push({
+            x: dates, y: gate.before[period], name: `${label} 执行前`,
+            type: 'scatter', mode: 'lines+markers',
+            line: { color: beforeColor, width: 2 }, marker: { size: 6 },
+        });
+        traces.push({
+            x: dates, y: gate.after[period], name: `${label} 执行后`,
+            type: 'scatter', mode: 'lines+markers',
+            line: { color: afterColor, width: 2, dash: 'dash' }, marker: { size: 6 },
+        });
+    });
+    traces.push({
+        x: dates, y: Array(7).fill(gate.peak_capacity), name: '容量上限',
+        type: 'scatter', mode: 'lines',
+        line: { color: '#c0392b', width: 2, dash: 'dot' },
+    });
+
+    const layout = {
+        title: { text: `${gate.gate_name} 调度前后对比`, font: { color: '#c9a84c', size: 16 } },
+        paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#a89b8c' },
+        xaxis: { title: '日期', gridcolor: '#2c3e6b' },
+        yaxis: { title: '通行量（人）', gridcolor: '#2c3e6b' },
+        legend: { orientation: 'h', y: -0.2 },
+        margin: { l: 60, r: 30, t: 40, b: 80 },
+        height: 400,
+    };
+    Plotly.newPlot('dispatchComparisonChart', traces, layout, { responsive: true });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    const today = new Date();
+    document.getElementById('histDate').value = today.toISOString().slice(0, 10);
+    loadHistoryTable();
+    const startDate = document.getElementById('predictStartDate').value;
+    loadPredictions(startDate);
+    loadOverloadWarnings(startDate);
+    loadDispatchSuggestions();
+    loadComparisonChart();
+});
+</script>
+{% endblock %}
