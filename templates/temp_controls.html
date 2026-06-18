@@ -7,7 +7,7 @@
 
 <div class="card">
     <h2>新增管制令</h2>
-    <form id="addOrderForm" method="POST" action="/temp-controls/add">
+    <form id="addOrderForm" method="POST" action="/temp-controls/add" onsubmit="return prepareSubmit()">
         <div class="form-grid">
             <div class="form-group">
                 <label>管制令名称</label>
@@ -142,7 +142,26 @@ function toggleRestrictFields() {
 function prepareSubmit() {
     const sel = document.getElementById('gateSelect');
     const ids = Array.from(sel.selectedOptions).map(o => o.value).join(',');
+    if (!ids) {
+        showToast('请至少选择一个城门', 'error');
+        return false;
+    }
     document.getElementById('gateIdsHidden').value = ids;
+
+    const actionType = document.getElementById('actionType').value;
+    if (actionType === 'restrict_hours') {
+        const openTime = document.getElementById('forcedOpen').value;
+        const closeTime = document.getElementById('forcedClose').value;
+        if (!openTime || !closeTime) {
+            showToast('限制开放时段类型必须填写限制开门时间和限制关门时间', 'error');
+            return false;
+        }
+        if (openTime >= closeTime) {
+            showToast('限制开门时间必须早于限制关门时间', 'error');
+            return false;
+        }
+    }
+    return true;
 }
 </script>
 {% endblock %}

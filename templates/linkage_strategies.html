@@ -7,7 +7,7 @@
 
 <div class="card">
     <h2>新增联动策略</h2>
-    <form id="addStrategyForm" method="POST" action="/linkage-strategies/add">
+    <form id="addStrategyForm" method="POST" action="/linkage-strategies/add" onsubmit="return prepareSubmit()">
         <div class="form-grid">
             <div class="form-group">
                 <label>策略名称</label>
@@ -174,15 +174,27 @@ function addLinkageItem() {
 
 function prepareSubmit() {
     const items = [];
+    const seenIds = new Set();
     document.querySelectorAll('.linkage-item-row').forEach(row => {
         const gateId = row.querySelector('.li-gate').value;
         const openTime = row.querySelector('.li-open').value;
         const closeTime = row.querySelector('.li-close').value;
         if (gateId) {
+            if (seenIds.has(parseInt(gateId))) {
+                const gateName = row.querySelector('.li-gate option:checked').text;
+                showToast(`城门「${gateName}」已被添加多次，请检查`, 'error');
+                return false;
+            }
+            seenIds.add(parseInt(gateId));
             items.push({ gate_id: parseInt(gateId), effect_open_time: openTime, effect_close_time: closeTime });
         }
     });
+    if (items.length === 0) {
+        showToast('请至少添加一个联动城门', 'error');
+        return false;
+    }
     document.getElementById('itemsJson').value = JSON.stringify(items);
+    return true;
 }
 </script>
 {% endblock %}

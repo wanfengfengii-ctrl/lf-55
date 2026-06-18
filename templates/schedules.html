@@ -54,6 +54,13 @@
 
 <div class="card">
     <h2>方案对比</h2>
+    <div class="form-grid" style="grid-template-columns: 250px auto;">
+        <div class="form-group">
+            <label>选择城门</label>
+            <select id="comparisonGateSelect" onchange="renderComparisonChart()">
+            </select>
+        </div>
+    </div>
     <div id="comparisonChart" style="min-height:400px;"></div>
 </div>
 
@@ -138,6 +145,7 @@
 let currentScheme = 'final';
 let scheduleData = null;
 let chartData = null;
+let currentComparisonGateIndex = 0;
 
 function switchScheme(scheme, btn) {
     currentScheme = scheme;
@@ -291,6 +299,14 @@ async function loadChartData(startDate) {
     try {
         const resp = await fetch(`/api/schedules/chart-data?start_date=${startDate}`);
         chartData = await resp.json();
+        
+        const sel = document.getElementById('comparisonGateSelect');
+        sel.innerHTML = '';
+        chartData.gates.forEach((gate, idx) => {
+            sel.innerHTML += `<option value="${idx}">${gate.gate_name} (${gate.gate_code})</option>`;
+        });
+        sel.value = '0';
+        
         renderWeeklyChart();
         renderComparisonChart();
     } catch (e) {
@@ -349,6 +365,10 @@ function renderWeeklyChart() {
 
 function renderComparisonChart() {
     if (!chartData || !chartData.gates.length) return;
+    const sel = document.getElementById('comparisonGateSelect');
+    if (sel) {
+        currentComparisonGateIndex = parseInt(sel.value) || 0;
+    }
     const traces = [];
     const schemeColors = {
         regular: '#27ae60',
@@ -357,12 +377,12 @@ function renderComparisonChart() {
         final: '#c9a84c'
     };
 
-    const firstGate = chartData.gates[0];
+    const gate = chartData.gates[currentComparisonGateIndex];
     const schemes = ['regular', 'festival', 'alert', 'final'];
 
     schemes.forEach(scheme => {
-        const openData = firstGate[scheme].open;
-        const closeData = firstGate[scheme].close;
+        const openData = gate[scheme].open;
+        const closeData = gate[scheme].close;
         if (openData.some(v => v !== null)) {
             traces.push({
                 x: chartData.dates.map(d => d.slice(5)),
@@ -375,7 +395,7 @@ function renderComparisonChart() {
     });
 
     const layout = {
-        title: { text: `方案对比 - ${firstGate.gate_name}`, font: { color: '#c9a84c', size: 16 } },
+        title: { text: `方案对比 - ${gate.gate_name}`, font: { color: '#c9a84c', size: 16 } },
         paper_bgcolor: 'rgba(0,0,0,0)',
         plot_bgcolor: 'rgba(0,0,0,0)',
         font: { color: '#a89b8c' },

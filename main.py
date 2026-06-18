@@ -711,6 +711,11 @@ async def add_temp_control(
     gid_list = [int(x) for x in gate_ids.split(",") if x.strip().isdigit()]
     if not gid_list:
         return redirect_with_error("/temp-controls", "请至少选择一个城门")
+    if action_type == "restrict_hours":
+        if not forced_open_time or not forced_close_time:
+            return redirect_with_error("/temp-controls", "限制开放时段类型必须填写限制开门时间和限制关门时间")
+        if _time_to_minutes(forced_open_time) >= _time_to_minutes(forced_close_time):
+            return redirect_with_error("/temp-controls", "限制开门时间必须早于限制关门时间")
     result = create_temp_control(
         order_name, start_date, end_date, time_start, time_end,
         action_type, forced_open_time, forced_close_time,
@@ -767,6 +772,9 @@ async def add_linkage_strategy(
         return redirect_with_error("/linkage-strategies", "联动项数据格式错误")
     if not items:
         return redirect_with_error("/linkage-strategies", "请至少添加一个联动城门")
+    gate_ids = [item["gate_id"] for item in items]
+    if len(gate_ids) != len(set(gate_ids)):
+        return redirect_with_error("/linkage-strategies", "存在重复的联动城门，请检查后重新提交")
     result = create_linkage_strategy(
         strategy_name, trigger_type, trigger_gate_id,
         trigger_event, linked_open_time, linked_close_time,
