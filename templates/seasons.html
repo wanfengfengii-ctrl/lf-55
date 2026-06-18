@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}时令配置 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>时令配置</h1>
+</div>
+
+<div class="card">
+    <h2>新增时令</h2>
+    <form action="/seasons/add" method="post" class="form-grid">
+        <div class="form-group">
+            <label>时令名称</label>
+            <input type="text" name="season_name" required placeholder="如 春">
+        </div>
+        <div class="form-group">
+            <label>起始月</label>
+            <input type="number" name="start_month" min="1" max="12" required>
+        </div>
+        <div class="form-group">
+            <label>起始日</label>
+            <input type="number" name="start_day" min="1" max="31" required>
+        </div>
+        <div class="form-group">
+            <label>结束月</label>
+            <input type="number" name="end_month" min="1" max="12" required>
+        </div>
+        <div class="form-group">
+            <label>结束日</label>
+            <input type="number" name="end_day" min="1" max="31" required>
+        </div>
+        <div class="form-group">
+            <label>日出时间</label>
+            <input type="time" name="sunrise_time" required>
+        </div>
+        <div class="form-group">
+            <label>日落时间</label>
+            <input type="time" name="sunset_time" required>
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="submit" class="btn btn-primary">添加时令</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>时令列表</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>时令</th>
+                    <th>起始日期</th>
+                    <th>结束日期</th>
+                    <th>日出</th>
+                    <th>日落</th>
+                    <th>白昼时长</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in seasons %}
+                <tr>
+                    <td><span class="badge badge-gold">{{ s.season_name }}</span></td>
+                    <td>{{ s.start_month }}月{{ s.start_day }}日</td>
+                    <td>{{ s.end_month }}月{{ s.end_day }}日</td>
+                    <td><span class="badge badge-orange">{{ s.sunrise_time }}</span></td>
+                    <td><span class="badge badge-purple">{{ s.sunset_time }}</span></td>
+                    <td>
+                        {% set sunrise_m = s.sunrise_time.split(':')[0]|int * 60 + s.sunrise_time.split(':')[1]|int %}
+                        {% set sunset_m = s.sunset_time.split(':')[0]|int * 60 + s.sunset_time.split(':')[1]|int %}
+                        {% set diff = sunset_m - sunrise_m %}
+                        {{ diff // 60 }}时{{ diff % 60 }}分
+                    </td>
+                    <td>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="openEditModal({{ s.id }}, '{{ s.season_name }}', {{ s.start_month }}, {{ s.start_day }}, {{ s.end_month }}, {{ s.end_day }}, '{{ s.sunrise_time }}', '{{ s.sunset_time }}')">编辑</button>
+                        <form action="/seasons/delete/{{ s.id }}" method="post" style="display:inline;"
+                              onsubmit="return confirm('确定删除时令 {{ s.season_name }}？关联宵禁规则也将被删除。')">
+                            <button type="submit" class="btn btn-danger btn-sm">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not seasons %}
+                <tr><td colspan="7" style="text-align:center;color:var(--text-secondary);">暂无时令数据</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="editModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <span class="close" onclick="closeEditModal()">&times;</span>
+        <h3>编辑时令</h3>
+        <form id="editForm" method="post" class="form-grid">
+            <input type="hidden" name="season_id" id="editSeasonId">
+            <div class="form-group">
+                <label>时令名称</label>
+                <input type="text" name="season_name" id="editSeasonName" required>
+            </div>
+            <div class="form-group">
+                <label>起始月</label>
+                <input type="number" name="start_month" id="editStartMonth" min="1" max="12" required>
+            </div>
+            <div class="form-group">
+                <label>起始日</label>
+                <input type="number" name="start_day" id="editStartDay" min="1" max="31" required>
+            </div>
+            <div class="form-group">
+                <label>结束月</label>
+                <input type="number" name="end_month" id="editEndMonth" min="1" max="12" required>
+            </div>
+            <div class="form-group">
+                <label>结束日</label>
+                <input type="number" name="end_day" id="editEndDay" min="1" max="31" required>
+            </div>
+            <div class="form-group">
+                <label>日出时间</label>
+                <input type="time" name="sunrise_time" id="editSunrise" required>
+            </div>
+            <div class="form-group">
+                <label>日落时间</label>
+                <input type="time" name="sunset_time" id="editSunset" required>
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">保存修改</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+.modal {
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.6);
+}
+.modal-content {
+    background-color: var(--bg-card);
+    margin: 5% auto;
+    padding: 20px;
+    border: 1px solid var(--accent-gold);
+    border-radius: var(--radius);
+    width: 80%;
+    max-width: 700px;
+    box-shadow: var(--shadow);
+}
+.close {
+    color: var(--text-secondary);
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+.close:hover {
+    color: var(--accent-gold);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function openEditModal(id, name, sm, sd, em, ed, sunrise, sunset) {
+    document.getElementById('editSeasonId').value = id;
+    document.getElementById('editSeasonName').value = name;
+    document.getElementById('editStartMonth').value = sm;
+    document.getElementById('editStartDay').value = sd;
+    document.getElementById('editEndMonth').value = em;
+    document.getElementById('editEndDay').value = ed;
+    document.getElementById('editSunrise').value = sunrise;
+    document.getElementById('editSunset').value = sunset;
+    document.getElementById('editForm').action = `/seasons/edit/${id}`;
+    document.getElementById('editModal').style.display = 'block';
+}
+
+function closeEditModal() {
+    document.getElementById('editModal').style.display = 'none';
+}
+
+window.onclick = function(event) {
+    const modal = document.getElementById('editModal');
+    if (event.target === modal) {
+        closeEditModal();
+    }
+}
+</script>
+{% endblock %}

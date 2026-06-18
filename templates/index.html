@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}总览 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>古城门启闭排班系统</h1>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ gates|length }}</div>
+        <div class="stat-label">城门数量</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ seasons|length }}</div>
+        <div class="stat-label">时令配置</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ alert_levels|length }}</div>
+        <div class="stat-label">警戒等级</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>城门概览</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>编号</th>
+                    <th>名称</th>
+                    <th>方位</th>
+                    <th>主门</th>
+                    <th>备注</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for gate in gates %}
+                <tr>
+                    <td><span class="badge badge-gold">{{ gate.gate_code }}</span></td>
+                    <td>{{ gate.gate_name }}</td>
+                    <td><span class="badge badge-blue">{{ gate.direction }}</span></td>
+                    <td>{{ '是' if gate.is_main else '否' }}</td>
+                    <td>{{ gate.notes or '-' }}</td>
+                </tr>
+                {% endfor %}
+                {% if not gates %}
+                <tr><td colspan="5" style="text-align:center;color:var(--text-secondary);">暂无城门数据，请先配置城门</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <h2>时令日出日落</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>时令</th>
+                    <th>起始</th>
+                    <th>结束</th>
+                    <th>日出</th>
+                    <th>日落</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in seasons %}
+                <tr>
+                    <td>{{ s.season_name }}</td>
+                    <td>{{ s.start_month }}月{{ s.start_day }}日</td>
+                    <td>{{ s.end_month }}月{{ s.end_day }}日</td>
+                    <td><span class="badge badge-orange">{{ s.sunrise_time }}</span></td>
+                    <td><span class="badge badge-purple">{{ s.sunset_time }}</span></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <h2>警戒等级</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>等级</th>
+                    <th>数值</th>
+                    <th>提前关闭(分钟)</th>
+                    <th>延迟开门(分钟)</th>
+                    <th>说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for a in alert_levels %}
+                <tr>
+                    <td><span class="badge {% if a.level_value >= 4 %}badge-red{% elif a.level_value >= 3 %}badge-orange{% else %}badge-green{% endif %}">{{ a.level_name }}</span></td>
+                    <td>{{ a.level_value }}</td>
+                    <td>{{ a.close_advance_minutes }}</td>
+                    <td>{{ a.open_delay_minutes }}</td>
+                    <td>{{ a.description or '-' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

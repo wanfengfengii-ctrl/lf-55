@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}古城门启闭排班系统{% endblock %}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+</head>
+<body>
+    <nav>
+        <a href="/" class="nav-brand">古城门启闭排班</a>
+        <ul class="nav-links">
+            <li><a href="/" class="{% if active_page == 'home' %}active{% endif %}">总览</a></li>
+            <li><a href="/gates" class="{% if active_page == 'gates' %}active{% endif %}">城门配置</a></li>
+            <li><a href="/seasons" class="{% if active_page == 'seasons' %}active{% endif %}">时令配置</a></li>
+            <li><a href="/curfews" class="{% if active_page == 'curfews' %}active{% endif %}">宵禁规则</a></li>
+            <li><a href="/festivals" class="{% if active_page == 'festivals' %}active{% endif %}">节庆活动</a></li>
+            <li><a href="/alerts" class="{% if active_page == 'alerts' %}active{% endif %}">警戒等级</a></li>
+            <li><a href="/schedules" class="{% if active_page == 'schedules' %}active{% endif %}">排班方案</a></li>
+        </ul>
+    </nav>
+
+    <div class="container">
+        {% block content %}{% endblock %}
+    </div>
+
+    <div id="toast-container"></div>
+
+    <script>
+        function showToast(message, type = 'success') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast toast-${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transition = 'opacity 0.3s';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        function minutesToTime(m) {
+            if (m === null || m === undefined) return '--';
+            const h = Math.floor(m / 60) % 24;
+            const min = m % 60;
+            return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+        }
+
+        async function apiCall(url, method = 'GET', body = null) {
+            const opts = { method };
+            if (body) {
+                opts.headers = { 'Content-Type': 'application/json' };
+                opts.body = JSON.stringify(body);
+            }
+            const resp = await fetch(url, opts);
+            return resp.json();
+        }
+    </script>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>

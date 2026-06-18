@@ -1,0 +1,328 @@
+{% extends "base.html" %}
+{% block title %}排班方案 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>排班方案</h1>
+</div>
+
+<div class="card">
+    <h2>生成排班</h2>
+    <div class="form-grid" style="grid-template-columns: 250px auto;">
+        <div class="form-group">
+            <label>起始日期（生成一周）</label>
+            <input type="date" id="startDate" value="{{ start_date }}">
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-primary" onclick="generateSchedules()">生成排班方案</button>
+        </div>
+    </div>
+</div>
+
+<div id="conflictPanel" class="card" style="display:none;">
+    <h2 style="color:var(--accent-red);">规则冲突提示</h2>
+    <div id="conflictList"></div>
+</div>
+
+<div class="card">
+    <h2>每日启闭时间表</h2>
+    <div class="scheme-tabs">
+        <button class="scheme-tab active" data-scheme="final" onclick="switchScheme('final', this)">最终方案</button>
+        <button class="scheme-tab" data-scheme="regular" onclick="switchScheme('regular', this)">常规规则</button>
+        <button class="scheme-tab" data-scheme="festival" onclick="switchScheme('festival', this)">节庆延迟</button>
+        <button class="scheme-tab" data-scheme="alert" onclick="switchScheme('alert', this)">警戒关闭</button>
+    </div>
+    <div class="table-responsive">
+        <table id="scheduleTable">
+            <thead>
+                <tr id="scheduleHeader"></tr>
+            </thead>
+            <tbody id="scheduleBody"></tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <h2>一周启闭趋势</h2>
+    <div id="weeklyChart" style="min-height:450px;"></div>
+</div>
+
+<div class="card">
+    <h2>方案对比</h2>
+    <div id="comparisonChart" style="min-height:400px;"></div>
+</div>
+
+<div class="card">
+    <h2>发布排班</h2>
+    <div class="form-grid" style="grid-template-columns: 250px auto;">
+        <div class="form-group">
+            <label>选择日期</label>
+            <input type="date" id="publishDate">
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="button" class="btn btn-success" onclick="publishSchedule()">发布排班</button>
+            <button type="button" class="btn btn-primary" style="margin-left:0.5rem;" onclick="checkPublish()">检查冲突</button>
+        </div>
+    </div>
+    <div id="publishResult" style="margin-top:1rem;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentScheme = 'final';
+let scheduleData = null;
+let chartData = null;
+
+function switchScheme(scheme, btn) {
+    currentScheme = scheme;
+    document.querySelectorAll('.scheme-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    renderScheduleTable();
+}
+
+async function generateSchedules() {
+    const startDate = document.getElementById('startDate').value;
+    if (!startDate) {
+        showToast('请选择起始日期', 'error');
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/schedules/generate?start_date=${startDate}`);
+        scheduleData = await resp.json();
+        renderScheduleTable();
+        renderConflicts();
+        await loadChartData(startDate);
+        showToast('排班方案已生成', 'success');
+    } catch (e) {
+        showToast('生成失败: ' + e.message, 'error');
+    }
+}
+
+function renderScheduleTable() {
+    if (!scheduleData || scheduleData.length === 0) {
+        document.getElementById('scheduleHeader').innerHTML = '';
+        document.getElementById('scheduleBody').innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-secondary);">请先生成排班方案</td></tr>';
+        return;
+    }
+
+    const dates = [...new Set(scheduleData.map(s => s.date))].sort();
+    const gates = [...new Map(scheduleData.map(s => [s.gate_name, s.gate_id])).entries()];
+
+    let headerHtml = '<th>城门</th>';
+    dates.forEach(d => {
+        const dayName = new Date(d + 'T00:00:00').toLocaleDateString('zh-CN', { weekday: 'short' });
+        headerHtml += `<th>${d.slice(5)}<br><small>${dayName}</small></th>`;
+    });
+    document.getElementById('scheduleHeader').innerHTML = headerHtml;
+
+    let bodyHtml = '';
+    gates.forEach(([gateName, gateId]) => {
+        bodyHtml += `<tr><td><strong>${gateName}</strong></td>`;
+        dates.forEach(d => {
+            const item = scheduleData.find(s => s.gate_id === gateId && s.date === d);
+            if (item) {
+                let schemeData = null;
+                if (currentScheme === 'final' && item.final) schemeData = item.final;
+                else if (currentScheme === 'regular') schemeData = item.regular;
+                else if (currentScheme === 'festival' && item.festival) schemeData = item.festival;
+                else if (currentScheme === 'alert' && item.alert) schemeData = item.alert;
+                else if (currentScheme === 'festival' || currentScheme === 'alert') schemeData = item.regular;
+
+                if (schemeData) {
+                    const hasConflict = item.has_conflict && currentScheme === 'final';
+                    const conflictClass = hasConflict ? 'style="background:rgba(192,57,43,0.1);"' : '';
+                    const indicator = hasConflict ? '<span class="conflict-indicator error"></span>' : '<span class="conflict-indicator ok"></span>';
+                    bodyHtml += `<td ${conflictClass}>${indicator}${schemeData.open} - ${schemeData.close}</td>`;
+                } else {
+                    bodyHtml += '<td>-</td>';
+                }
+            } else {
+                bodyHtml += '<td>-</td>';
+            }
+        });
+        bodyHtml += '</tr>';
+    });
+    document.getElementById('scheduleBody').innerHTML = bodyHtml;
+}
+
+function renderConflicts() {
+    if (!scheduleData) return;
+    const conflicts = scheduleData.filter(s => s.has_conflict);
+    const panel = document.getElementById('conflictPanel');
+    const list = document.getElementById('conflictList');
+    if (conflicts.length === 0) {
+        panel.style.display = 'none';
+        return;
+    }
+    panel.style.display = 'block';
+    let html = '';
+    conflicts.forEach(c => {
+        html += `<div class="alert alert-danger" style="margin-bottom:0.5rem;">
+            <strong>${c.gate_name} (${c.date})</strong>: ${c.conflicts.join('；')}
+        </div>`;
+    });
+    list.innerHTML = html;
+}
+
+async function loadChartData(startDate) {
+    try {
+        const resp = await fetch(`/api/schedules/chart-data?start_date=${startDate}`);
+        chartData = await resp.json();
+        renderWeeklyChart();
+        renderComparisonChart();
+    } catch (e) {
+        console.error('Chart data error:', e);
+    }
+}
+
+function renderWeeklyChart() {
+    if (!chartData || !chartData.gates.length) return;
+    const traces = [];
+    const colors = {
+        regular: { open: '#e67e22', close: '#9b59b6' },
+        final: { open: '#c9a84c', close: '#c0392b' }
+    };
+
+    chartData.gates.forEach(gate => {
+        traces.push({
+            x: chartData.dates.map(d => d.slice(5)),
+            y: gate.final.open,
+            name: `${gate.gate_name} 开门`,
+            type: 'scatter',
+            mode: 'lines+markers',
+            line: { color: colors.final.open, width: 2 },
+            marker: { size: 6 }
+        });
+        traces.push({
+            x: chartData.dates.map(d => d.slice(5)),
+            y: gate.final.close,
+            name: `${gate.gate_name} 关门`,
+            type: 'scatter',
+            mode: 'lines+markers',
+            line: { color: colors.final.close, width: 2 },
+            marker: { size: 6 }
+        });
+    });
+
+    const layout = {
+        title: { text: '一周启闭趋势（最终方案）', font: { color: '#c9a84c', size: 16 } },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#a89b8c' },
+        xaxis: { title: '日期', gridcolor: '#2c3e6b' },
+        yaxis: {
+            title: '时间',
+            gridcolor: '#2c3e6b',
+            tickvals: [240, 300, 360, 420, 480, 540, 600, 660, 720, 780, 840, 900, 960, 1020, 1080, 1140, 1200],
+            ticktext: ['04:00','05:00','06:00','07:00','08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00','19:00','20:00']
+        },
+        legend: { orientation: 'h', y: -0.2 },
+        margin: { l: 60, r: 30, t: 40, b: 80 },
+        height: 420
+    };
+
+    Plotly.newPlot('weeklyChart', traces, layout, { responsive: true });
+}
+
+function renderComparisonChart() {
+    if (!chartData || !chartData.gates.length) return;
+    const traces = [];
+    const schemeColors = {
+        regular: '#27ae60',
+        festival: '#e67e22',
+        alert: '#c0392b',
+        final: '#c9a84c'
+    };
+
+    const firstGate = chartData.gates[0];
+    const schemes = ['regular', 'festival', 'alert', 'final'];
+
+    schemes.forEach(scheme => {
+        const openData = firstGate[scheme].open;
+        const closeData = firstGate[scheme].close;
+        if (openData.some(v => v !== null)) {
+            traces.push({
+                x: chartData.dates.map(d => d.slice(5)),
+                y: closeData,
+                name: `${scheme === 'regular' ? '常规' : scheme === 'festival' ? '节庆' : scheme === 'alert' ? '警戒' : '最终'}关门`,
+                type: 'bar',
+                marker: { color: schemeColors[scheme], opacity: 0.7 }
+            });
+        }
+    });
+
+    const layout = {
+        title: { text: `方案对比 - ${firstGate.gate_name}`, font: { color: '#c9a84c', size: 16 } },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        font: { color: '#a89b8c' },
+        barmode: 'group',
+        xaxis: { title: '日期', gridcolor: '#2c3e6b' },
+        yaxis: {
+            title: '关门时间(分钟)',
+            gridcolor: '#2c3e6b',
+            tickvals: [720, 780, 840, 900, 960, 1020, 1080, 1140, 1200, 1260],
+            ticktext: ['12:00','13:00','14:00','15:00','16:00','17:00','18:00','19:00','20:00','21:00']
+        },
+        legend: { orientation: 'h', y: -0.25 },
+        margin: { l: 60, r: 30, t: 40, b: 80 },
+        height: 380
+    };
+
+    Plotly.newPlot('comparisonChart', traces, layout, { responsive: true });
+}
+
+async function checkPublish() {
+    const dateStr = document.getElementById('publishDate').value;
+    if (!dateStr) {
+        showToast('请选择日期', 'error');
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/schedules/check-publish?date_str=${dateStr}`);
+        const result = await resp.json();
+        const el = document.getElementById('publishResult');
+        if (result.can_publish) {
+            el.innerHTML = '<div class="alert alert-success">该日期排班无冲突，可以发布。</div>';
+        } else {
+            let html = '<div class="alert alert-danger"><strong>存在冲突，无法发布：</strong><ul>';
+            result.reasons.forEach(r => { html += `<li>${r}</li>`; });
+            html += '</ul></div>';
+            el.innerHTML = html;
+        }
+    } catch (e) {
+        showToast('检查失败', 'error');
+    }
+}
+
+async function publishSchedule() {
+    const dateStr = document.getElementById('publishDate').value;
+    if (!dateStr) {
+        showToast('请选择日期', 'error');
+        return;
+    }
+    try {
+        const resp = await fetch(`/api/schedules/publish?date_str=${dateStr}`, { method: 'POST' });
+        const result = await resp.json();
+        if (result.success) {
+            showToast('排班发布成功！', 'success');
+            document.getElementById('publishResult').innerHTML = '<div class="alert alert-success">排班已成功发布！</div>';
+        } else {
+            showToast('发布失败', 'error');
+            let html = '<div class="alert alert-danger"><strong>发布失败：</strong><ul>';
+            result.errors.forEach(r => { html += `<li>${r}</li>`; });
+            html += '</ul></div>';
+            document.getElementById('publishResult').innerHTML = html;
+        }
+    } catch (e) {
+        showToast('发布失败: ' + e.message, 'error');
+    }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    generateSchedules();
+});
+</script>
+{% endblock %}

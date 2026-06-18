@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+{% block title %}宵禁规则 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>宵禁规则</h1>
+</div>
+
+<div class="card">
+    <h2>新增宵禁规则</h2>
+    <form action="/curfews/add" method="post" class="form-grid">
+        <div class="form-group">
+            <label>规则名称</label>
+            <input type="text" name="rule_name" required placeholder="如 春季宵禁">
+        </div>
+        <div class="form-group">
+            <label>关联时令</label>
+            <select name="season_id" required>
+                {% for s in seasons %}
+                <option value="{{ s.id }}">{{ s.season_name }} ({{ s.start_month }}月{{ s.start_day }}日-{{ s.end_month }}月{{ s.end_day }}日)</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>宵禁开始</label>
+            <input type="time" name="curfew_start" required>
+        </div>
+        <div class="form-group">
+            <label>宵禁结束</label>
+            <input type="time" name="curfew_end" required>
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="submit" class="btn btn-primary">添加规则</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>宵禁规则列表</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>规则名称</th>
+                    <th>关联时令</th>
+                    <th>宵禁开始</th>
+                    <th>宵禁结束</th>
+                    <th>宵禁时长</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in curfews %}
+                <tr>
+                    <td>{{ c.rule_name }}</td>
+                    <td><span class="badge badge-gold">{{ c.season_name }}</span></td>
+                    <td><span class="badge badge-red">{{ c.curfew_start }}</span></td>
+                    <td><span class="badge badge-green">{{ c.curfew_end }}</span></td>
+                    <td>
+                        {% set cs = c.curfew_start.split(':')[0]|int * 60 + c.curfew_start.split(':')[1]|int %}
+                        {% set ce = c.curfew_end.split(':')[0]|int * 60 + c.curfew_end.split(':')[1]|int %}
+                        {% if ce > cs %}
+                            {% set dur = 1440 - cs + ce %}
+                        {% else %}
+                            {% set dur = ce - cs + 1440 %}
+                        {% endif %}
+                        {{ dur // 60 }}时{{ dur % 60 }}分
+                    </td>
+                    <td>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="openEditModal({{ c.id }}, '{{ c.rule_name }}', {{ c.season_id }}, '{{ c.curfew_start }}', '{{ c.curfew_end }}')">编辑</button>
+                        <form action="/curfews/delete/{{ c.id }}" method="post" style="display:inline;"
+                              onsubmit="return confirm('确定删除规则 {{ c.rule_name }}？')">
+                            <button type="submit" class="btn btn-danger btn-sm">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not curfews %}
+                <tr><td colspan="6" style="text-align:center;color:var(--text-secondary);">暂无宵禁规则，请先配置时令</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="editModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <span class="close" onclick="closeEditModal()">&times;</span>
+        <h3>编辑宵禁规则</h3>
+        <form id="editForm" method="post" class="form-grid">
+            <input type="hidden" name="curfew_id" id="editCurfewId">
+            <div class="form-group">
+                <label>规则名称</label>
+                <input type="text" name="rule_name" id="editRuleName" required>
+            </div>
+            <div class="form-group">
+                <label>关联时令</label>
+                <select name="season_id" id="editSeasonId" required>
+                    {% for s in seasons %}
+                    <option value="{{ s.id }}">{{ s.season_name }} ({{ s.start_month }}月{{ s.start_day }}日-{{ s.end_month }}月{{ s.end_day }}日)</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
+                <label>宵禁开始</label>
+                <input type="time" name="curfew_start" id="editCurfewStart" required>
+            </div>
+            <div class="form-group">
+                <label>宵禁结束</label>
+                <input type="time" name="curfew_end" id="editCurfewEnd" required>
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">保存修改</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+.modal {
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.6);
+}
+.modal-content {
+    background-color: var(--bg-card);
+    margin: 5% auto;
+    padding: 20px;
+    border: 1px solid var(--accent-gold);
+    border-radius: var(--radius);
+    width: 80%;
+    max-width: 600px;
+    box-shadow: var(--shadow);
+}
+.close {
+    color: var(--text-secondary);
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+.close:hover {
+    color: var(--accent-gold);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function openEditModal(id, name, seasonId, start, end) {
+    document.getElementById('editCurfewId').value = id;
+    document.getElementById('editRuleName').value = name;
+    document.getElementById('editSeasonId').value = seasonId;
+    document.getElementById('editCurfewStart').value = start;
+    document.getElementById('editCurfewEnd').value = end;
+    document.getElementById('editForm').action = `/curfews/edit/${id}`;
+    document.getElementById('editModal').style.display = 'block';
+}
+
+function closeEditModal() {
+    document.getElementById('editModal').style.display = 'none';
+}
+
+window.onclick = function(event) {
+    const modal = document.getElementById('editModal');
+    if (event.target === modal) {
+        closeEditModal();
+    }
+}
+</script>
+{% endblock %}

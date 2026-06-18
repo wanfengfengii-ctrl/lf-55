@@ -1,0 +1,184 @@
+{% extends "base.html" %}
+{% block title %}城门配置 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>城门配置</h1>
+</div>
+
+<div class="card">
+    <h2>新增城门</h2>
+    <form action="/gates/add" method="post" class="form-grid">
+        <div class="form-group">
+            <label>城门编号</label>
+            <input type="text" name="gate_code" required placeholder="如 DM-01" pattern="[A-Z]{2}-\d{2}">
+        </div>
+        <div class="form-group">
+            <label>城门名称</label>
+            <input type="text" name="gate_name" required placeholder="如 朝阳门">
+        </div>
+        <div class="form-group">
+            <label>方位</label>
+            <select name="direction" required>
+                <option value="东">东</option>
+                <option value="南">南</option>
+                <option value="西">西</option>
+                <option value="北">北</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>是否主门</label>
+            <select name="is_main">
+                <option value="0">否</option>
+                <option value="1">是</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>备注</label>
+            <input type="text" name="notes" placeholder="可选">
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="submit" class="btn btn-primary">添加城门</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>城门列表</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>编号</th>
+                    <th>名称</th>
+                    <th>方位</th>
+                    <th>主门</th>
+                    <th>备注</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for gate in gates %}
+                <tr>
+                    <td><span class="badge badge-gold">{{ gate.gate_code }}</span></td>
+                    <td>{{ gate.gate_name }}</td>
+                    <td><span class="badge badge-blue">{{ gate.direction }}</span></td>
+                    <td>{{ '是' if gate.is_main else '否' }}</td>
+                    <td>{{ gate.notes or '-' }}</td>
+                    <td>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="openEditModal({{ gate.id }}, '{{ gate.gate_code }}', '{{ gate.gate_name }}', '{{ gate.direction }}', {{ gate.is_main }}, '{{ gate.notes or '' }}')">编辑</button>
+                        <form action="/gates/delete/{{ gate.id }}" method="post" style="display:inline;"
+                              onsubmit="return confirm('确定删除城门 {{ gate.gate_name }}？关联的排班数据也将被删除。')">
+                            <button type="submit" class="btn btn-danger btn-sm">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not gates %}
+                <tr><td colspan="6" style="text-align:center;color:var(--text-secondary);">暂无城门数据</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="editModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <span class="close" onclick="closeEditModal()">&times;</span>
+        <h3>编辑城门</h3>
+        <form id="editForm" method="post" class="form-grid">
+            <input type="hidden" name="gate_id" id="editGateId">
+            <div class="form-group">
+                <label>城门编号</label>
+                <input type="text" name="gate_code" id="editGateCode" required pattern="[A-Z]{2}-\d{2}">
+            </div>
+            <div class="form-group">
+                <label>城门名称</label>
+                <input type="text" name="gate_name" id="editGateName" required>
+            </div>
+            <div class="form-group">
+                <label>方位</label>
+                <select name="direction" id="editDirection" required>
+                    <option value="东">东</option>
+                    <option value="南">南</option>
+                    <option value="西">西</option>
+                    <option value="北">北</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>是否主门</label>
+                <select name="is_main" id="editIsMain">
+                    <option value="0">否</option>
+                    <option value="1">是</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>备注</label>
+                <input type="text" name="notes" id="editNotes">
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">保存修改</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+.modal {
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.6);
+}
+.modal-content {
+    background-color: var(--bg-card);
+    margin: 5% auto;
+    padding: 20px;
+    border: 1px solid var(--accent-gold);
+    border-radius: var(--radius);
+    width: 80%;
+    max-width: 600px;
+    box-shadow: var(--shadow);
+}
+.close {
+    color: var(--text-secondary);
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+.close:hover {
+    color: var(--accent-gold);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function openEditModal(id, code, name, direction, isMain, notes) {
+    document.getElementById('editGateId').value = id;
+    document.getElementById('editGateCode').value = code;
+    document.getElementById('editGateName').value = name;
+    document.getElementById('editDirection').value = direction;
+    document.getElementById('editIsMain').value = isMain;
+    document.getElementById('editNotes').value = notes;
+    document.getElementById('editForm').action = `/gates/edit/${id}`;
+    document.getElementById('editModal').style.display = 'block';
+}
+
+function closeEditModal() {
+    document.getElementById('editModal').style.display = 'none';
+}
+
+window.onclick = function(event) {
+    const modal = document.getElementById('editModal');
+    if (event.target === modal) {
+        closeEditModal();
+    }
+}
+</script>
+{% endblock %}

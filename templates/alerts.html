@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}警戒等级 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>警戒等级</h1>
+</div>
+
+<div class="card">
+    <h2>新增警戒等级</h2>
+    <form action="/alerts/level/add" method="post" class="form-grid">
+        <div class="form-group">
+            <label>等级名称</label>
+            <input type="text" name="level_name" required placeholder="如 戒备">
+        </div>
+        <div class="form-group">
+            <label>等级数值(1-5)</label>
+            <input type="number" name="level_value" min="1" max="5" required>
+        </div>
+        <div class="form-group">
+            <label>提前关闭(分钟)</label>
+            <input type="number" name="close_advance_minutes" min="0" value="0">
+        </div>
+        <div class="form-group">
+            <label>延迟开门(分钟)</label>
+            <input type="number" name="open_delay_minutes" min="0" value="0">
+        </div>
+        <div class="form-group">
+            <label>说明</label>
+            <input type="text" name="description" placeholder="可选">
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="submit" class="btn btn-primary">添加等级</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>警戒等级列表</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>等级名称</th>
+                    <th>数值</th>
+                    <th>提前关闭</th>
+                    <th>延迟开门</th>
+                    <th>说明</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for l in levels %}
+                <tr>
+                    <td><span class="badge {% if l.level_value >= 4 %}badge-red{% elif l.level_value >= 3 %}badge-orange{% else %}badge-green{% endif %}">{{ l.level_name }}</span></td>
+                    <td>{{ l.level_value }}</td>
+                    <td>{{ l.close_advance_minutes }}分钟</td>
+                    <td>{{ l.open_delay_minutes }}分钟</td>
+                    <td>{{ l.description or '-' }}</td>
+                    <td>
+                        <button type="button" class="btn btn-primary btn-sm" onclick="openEditModal({{ l.id }}, '{{ l.level_name }}', {{ l.level_value }}, {{ l.close_advance_minutes }}, {{ l.open_delay_minutes }}, '{{ l.description or '' }}')">编辑</button>
+                        <form action="/alerts/level/delete/{{ l.id }}" method="post" style="display:inline;"
+                              onsubmit="return confirm('确定删除等级 {{ l.level_name }}？')">
+                            <button type="submit" class="btn btn-danger btn-sm">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <h2>每日警戒设定</h2>
+    <form action="/alerts/daily/add" method="post" class="form-grid">
+        <div class="form-group">
+            <label>日期</label>
+            <input type="date" name="alert_date" required>
+        </div>
+        <div class="form-group">
+            <label>警戒等级</label>
+            <select name="alert_level_id" required>
+                {% for l in levels %}
+                <option value="{{ l.id }}">{{ l.level_name }} (等级{{ l.level_value }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>&nbsp;</label>
+            <button type="submit" class="btn btn-primary">设定警戒</button>
+        </div>
+    </form>
+
+    <div class="table-responsive" style="margin-top:1rem;">
+        <table>
+            <thead>
+                <tr>
+                    <th>日期</th>
+                    <th>警戒等级</th>
+                    <th>等级数值</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for d in daily_alerts %}
+                <tr>
+                    <td>{{ d.alert_date }}</td>
+                    <td><span class="badge {% if d.level_value >= 4 %}badge-red{% elif d.level_value >= 3 %}badge-orange{% else %}badge-green{% endif %}">{{ d.level_name }}</span></td>
+                    <td>{{ d.level_value }}</td>
+                    <td>
+                        <form action="/alerts/daily/delete/{{ d.id }}" method="post" style="display:inline;"
+                              onsubmit="return confirm('确定移除该日警戒设定？')">
+                            <button type="submit" class="btn btn-danger btn-sm">移除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not daily_alerts %}
+                <tr><td colspan="4" style="text-align:center;color:var(--text-secondary);">暂无每日警戒设定</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div id="editModal" class="modal" style="display:none;">
+    <div class="modal-content">
+        <span class="close" onclick="closeEditModal()">&times;</span>
+        <h3>编辑警戒等级</h3>
+        <form id="editForm" method="post" class="form-grid">
+            <input type="hidden" name="level_id" id="editLevelId">
+            <div class="form-group">
+                <label>等级名称</label>
+                <input type="text" name="level_name" id="editLevelName" required>
+            </div>
+            <div class="form-group">
+                <label>等级数值(1-5)</label>
+                <input type="number" name="level_value" id="editLevelValue" min="1" max="5" required>
+            </div>
+            <div class="form-group">
+                <label>提前关闭(分钟)</label>
+                <input type="number" name="close_advance_minutes" id="editCloseAdvance" min="0" value="0">
+            </div>
+            <div class="form-group">
+                <label>延迟开门(分钟)</label>
+                <input type="number" name="open_delay_minutes" id="editOpenDelay" min="0" value="0">
+            </div>
+            <div class="form-group">
+                <label>说明</label>
+                <input type="text" name="description" id="editDescription">
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="submit" class="btn btn-primary">保存修改</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<style>
+.modal {
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0,0,0,0.6);
+}
+.modal-content {
+    background-color: var(--bg-card);
+    margin: 5% auto;
+    padding: 20px;
+    border: 1px solid var(--accent-gold);
+    border-radius: var(--radius);
+    width: 80%;
+    max-width: 700px;
+    box-shadow: var(--shadow);
+}
+.close {
+    color: var(--text-secondary);
+    float: right;
+    font-size: 28px;
+    font-weight: bold;
+    cursor: pointer;
+}
+.close:hover {
+    color: var(--accent-gold);
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function openEditModal(id, name, value, closeAdvance, openDelay, description) {
+    document.getElementById('editLevelId').value = id;
+    document.getElementById('editLevelName').value = name;
+    document.getElementById('editLevelValue').value = value;
+    document.getElementById('editCloseAdvance').value = closeAdvance;
+    document.getElementById('editOpenDelay').value = openDelay;
+    document.getElementById('editDescription').value = description;
+    document.getElementById('editForm').action = `/alerts/level/edit/${id}`;
+    document.getElementById('editModal').style.display = 'block';
+}
+
+function closeEditModal() {
+    document.getElementById('editModal').style.display = 'none';
+}
+
+window.onclick = function(event) {
+    const modal = document.getElementById('editModal');
+    if (event.target === modal) {
+        closeEditModal();
+    }
+}
+</script>
+{% endblock %}
