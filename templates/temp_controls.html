@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}临时管制令 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>临时管制令</h1>
+</div>
+
+<div class="card">
+    <h2>新增管制令</h2>
+    <form id="addOrderForm" method="POST" action="/temp-controls/add">
+        <div class="form-grid">
+            <div class="form-group">
+                <label>管制令名称</label>
+                <input type="text" name="order_name" required placeholder="如：暴雨紧急管制">
+            </div>
+            <div class="form-group">
+                <label>开始日期</label>
+                <input type="date" name="start_date" required id="tcStartDate">
+            </div>
+            <div class="form-group">
+                <label>结束日期</label>
+                <input type="date" name="end_date" required id="tcEndDate">
+            </div>
+            <div class="form-group">
+                <label>每日时段起</label>
+                <input type="time" name="time_start" value="00:00">
+            </div>
+            <div class="form-group">
+                <label>每日时段止</label>
+                <input type="time" name="time_end" value="23:59">
+            </div>
+            <div class="form-group">
+                <label>管制类型</label>
+                <select name="action_type" id="actionType" onchange="toggleRestrictFields()">
+                    <option value="force_close">强制关闭</option>
+                    <option value="force_open">强制全天开放</option>
+                    <option value="restrict_hours">限制开放时段</option>
+                </select>
+            </div>
+            <div class="form-group" id="forcedOpenGroup" style="display:none;">
+                <label>限制开门时间</label>
+                <input type="time" name="forced_open_time" id="forcedOpen" value="">
+            </div>
+            <div class="form-group" id="forcedCloseGroup" style="display:none;">
+                <label>限制关门时间</label>
+                <input type="time" name="forced_close_time" id="forcedClose" value="">
+            </div>
+            <div class="form-group">
+                <label>优先级（数值越大越高）</label>
+                <input type="number" name="priority" value="10" min="1" max="100">
+            </div>
+            <div class="form-group">
+                <label>覆盖原因</label>
+                <input type="text" name="override_reason" placeholder="如：极端天气，需紧急管控">
+            </div>
+        </div>
+        <div class="form-group" style="margin-top:1rem;">
+            <label>适用城门（按住 Ctrl 多选）</label>
+            <select name="gate_ids" id="gateSelect" multiple style="height:120px;">
+                {% for g in gates %}
+                <option value="{{ g.id }}">{{ g.gate_name }} ({{ g.gate_code }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <input type="hidden" name="gate_ids" id="gateIdsHidden">
+        <div style="margin-top:1rem;">
+            <button type="submit" class="btn btn-primary" onclick="prepareSubmit()">发布管制令</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>当前管制令列表</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>名称</th>
+                    <th>日期范围</th>
+                    <th>时段</th>
+                    <th>类型</th>
+                    <th>适用城门</th>
+                    <th>优先级</th>
+                    <th>状态</th>
+                    <th>覆盖原因</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for o in orders %}
+                <tr>
+                    <td><strong>{{ o.order_name }}</strong></td>
+                    <td>{{ o.start_date }} ~ {{ o.end_date }}</td>
+                    <td>{{ o.time_start }}-{{ o.time_end }}</td>
+                    <td>
+                        {% if o.action_type == 'force_close' %}
+                        <span class="badge badge-red">强制关闭</span>
+                        {% elif o.action_type == 'force_open' %}
+                        <span class="badge badge-green">强制开放</span>
+                        {% else %}
+                        <span class="badge badge-orange">限制时段</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ o.gates | map(attribute='gate_name') | join('、') }}</td>
+                    <td><span class="badge badge-gold">{{ o.priority }}</span></td>
+                    <td>
+                        {% if o.is_active %}
+                        <span class="badge badge-green">生效中</span>
+                        {% else %}
+                        <span class="badge badge-red">已停用</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ o.override_reason or '-' }}</td>
+                    <td>
+                        <form method="POST" action="/temp-controls/toggle/{{ o.id }}" style="display:inline;">
+                            <button type="submit" class="btn btn-sm btn-primary">{% if o.is_active %}停用{% else %}启用{% endif %}</button>
+                        </form>
+                        <form method="POST" action="/temp-controls/delete/{{ o.id }}" style="display:inline;" onsubmit="return confirm('确认删除此管制令？')">
+                            <button type="submit" class="btn btn-danger">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not orders %}
+                <tr><td colspan="9" style="text-align:center;color:var(--text-secondary);">暂无管制令</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleRestrictFields() {
+    const type = document.getElementById('actionType').value;
+    const show = type === 'restrict_hours';
+    document.getElementById('forcedOpenGroup').style.display = show ? '' : 'none';
+    document.getElementById('forcedCloseGroup').style.display = show ? '' : 'none';
+}
+
+function prepareSubmit() {
+    const sel = document.getElementById('gateSelect');
+    const ids = Array.from(sel.selectedOptions).map(o => o.value).join(',');
+    document.getElementById('gateIdsHidden').value = ids;
+}
+</script>
+{% endblock %}

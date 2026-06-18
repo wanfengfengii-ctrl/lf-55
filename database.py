@@ -97,6 +97,65 @@ def init_db():
     """)
 
     c.execute("""
+        CREATE TABLE IF NOT EXISTS temp_control_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_name TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            time_start TEXT DEFAULT '00:00',
+            time_end TEXT DEFAULT '23:59',
+            action_type TEXT NOT NULL CHECK(action_type IN ('force_close','force_open','restrict_hours')),
+            forced_open_time TEXT DEFAULT '',
+            forced_close_time TEXT DEFAULT '',
+            priority INTEGER NOT NULL DEFAULT 10,
+            override_reason TEXT DEFAULT '',
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS temp_control_gates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            gate_id INTEGER NOT NULL,
+            FOREIGN KEY (order_id) REFERENCES temp_control_orders(id) ON DELETE CASCADE,
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            UNIQUE(order_id, gate_id)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS gate_linkage_strategies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_name TEXT NOT NULL,
+            trigger_type TEXT NOT NULL CHECK(trigger_type IN ('gate_event','time_based','manual')),
+            trigger_gate_id INTEGER DEFAULT NULL,
+            trigger_event TEXT DEFAULT '',
+            linked_open_time TEXT DEFAULT '',
+            linked_close_time TEXT DEFAULT '',
+            priority INTEGER NOT NULL DEFAULT 5,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            description TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (trigger_gate_id) REFERENCES gates(id) ON DELETE SET NULL
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS gate_linkage_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_id INTEGER NOT NULL,
+            gate_id INTEGER NOT NULL,
+            effect_open_time TEXT DEFAULT '',
+            effect_close_time TEXT DEFAULT '',
+            FOREIGN KEY (strategy_id) REFERENCES gate_linkage_strategies(id) ON DELETE CASCADE,
+            FOREIGN KEY (gate_id) REFERENCES gates(id) ON DELETE CASCADE,
+            UNIQUE(strategy_id, gate_id)
+        )
+    """)
+
+    c.execute("""
         CREATE TABLE IF NOT EXISTS published_schedules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             gate_id INTEGER NOT NULL,
@@ -108,6 +167,21 @@ def init_db():
             UNIQUE(gate_id, schedule_date)
         )
     """)
+
+    try:
+        c.execute("ALTER TABLE schedules ADD COLUMN rule_chain TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+    try:
+        c.execute("ALTER TABLE schedules ADD COLUMN override_reason TEXT DEFAULT ''")
+    except Exception:
+        pass
+
+    try:
+        c.execute("ALTER TABLE schedules ADD COLUMN linkage_scope TEXT DEFAULT ''")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()

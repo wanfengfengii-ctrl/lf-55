@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}多城门联动策略 - 古城门启闭排班系统{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>多城门联动策略</h1>
+</div>
+
+<div class="card">
+    <h2>新增联动策略</h2>
+    <form id="addStrategyForm" method="POST" action="/linkage-strategies/add">
+        <div class="form-grid">
+            <div class="form-group">
+                <label>策略名称</label>
+                <input type="text" name="strategy_name" required placeholder="如：南北门同步启闭">
+            </div>
+            <div class="form-group">
+                <label>触发类型</label>
+                <select name="trigger_type" id="triggerType" onchange="toggleTriggerFields()">
+                    <option value="manual">手动触发</option>
+                    <option value="gate_event">城门事件触发</option>
+                    <option value="time_based">定时触发</option>
+                </select>
+            </div>
+            <div class="form-group" id="triggerGateGroup" style="display:none;">
+                <label>触发城门</label>
+                <select name="trigger_gate_id" id="triggerGate">
+                    <option value="">--选择城门--</option>
+                    {% for g in gates %}
+                    <option value="{{ g.id }}">{{ g.gate_name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group" id="triggerEventGroup" style="display:none;">
+                <label>触发事件描述</label>
+                <input type="text" name="trigger_event" placeholder="如：关闭时联动">
+            </div>
+            <div class="form-group">
+                <label>联动默认开门时间</label>
+                <input type="time" name="linked_open_time" value="">
+            </div>
+            <div class="form-group">
+                <label>联动默认关门时间</label>
+                <input type="time" name="linked_close_time" value="">
+            </div>
+            <div class="form-group">
+                <label>优先级</label>
+                <input type="number" name="priority" value="5" min="1" max="100">
+            </div>
+        </div>
+        <div class="form-group" style="margin-top:1rem;">
+            <label>策略说明</label>
+            <input type="text" name="description" placeholder="策略描述" style="width:100%;">
+        </div>
+
+        <h3 style="color:var(--accent-gold);margin:1.5rem 0 0.75rem;font-size:1rem;">联动城门配置</h3>
+        <div id="linkageItems">
+            <div class="linkage-item-row" style="display:grid;grid-template-columns:1fr 120px 120px auto;gap:0.5rem;align-items:end;margin-bottom:0.5rem;">
+                <div class="form-group">
+                    <label>城门</label>
+                    <select class="li-gate">
+                        {% for g in gates %}
+                        <option value="{{ g.id }}">{{ g.gate_name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>开门时间</label>
+                    <input type="time" class="li-open" value="">
+                </div>
+                <div class="form-group">
+                    <label>关门时间</label>
+                    <input type="time" class="li-close" value="">
+                </div>
+                <div class="form-group">
+                    <label>&nbsp;</label>
+                    <button type="button" class="btn btn-danger" onclick="this.closest('.linkage-item-row').remove()">移除</button>
+                </div>
+            </div>
+        </div>
+        <button type="button" class="btn btn-primary" style="margin-top:0.5rem;" onclick="addLinkageItem()">添加联动城门</button>
+
+        <input type="hidden" name="items_json" id="itemsJson">
+        <div style="margin-top:1rem;">
+            <button type="submit" class="btn btn-success" onclick="prepareSubmit()">创建联动策略</button>
+        </div>
+    </form>
+</div>
+
+<div class="card">
+    <h2>联动策略列表</h2>
+    <div class="table-responsive">
+        <table>
+            <thead>
+                <tr>
+                    <th>策略名称</th>
+                    <th>触发类型</th>
+                    <th>触发城门</th>
+                    <th>联动城门</th>
+                    <th>优先级</th>
+                    <th>状态</th>
+                    <th>说明</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in strategies %}
+                <tr>
+                    <td><strong>{{ s.strategy_name }}</strong></td>
+                    <td>
+                        {% if s.trigger_type == 'manual' %}
+                        <span class="badge badge-blue">手动</span>
+                        {% elif s.trigger_type == 'gate_event' %}
+                        <span class="badge badge-orange">城门事件</span>
+                        {% else %}
+                        <span class="badge badge-purple">定时</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ s.trigger_gate_name or '-' }}</td>
+                    <td>
+                        {% for g in s.linked_gates %}
+                        {{ g.gate_name }}{% if g.effect_open_time or g.effect_close_time %}({{ g.effect_open_time or '···' }}-{{ g.effect_close_time or '···' }}){% endif %}{% if not loop.last %}、{% endif %}
+                        {% endfor %}
+                    </td>
+                    <td><span class="badge badge-gold">{{ s.priority }}</span></td>
+                    <td>
+                        {% if s.is_active %}
+                        <span class="badge badge-green">生效中</span>
+                        {% else %}
+                        <span class="badge badge-red">已停用</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ s.description or '-' }}</td>
+                    <td>
+                        <form method="POST" action="/linkage-strategies/toggle/{{ s.id }}" style="display:inline;">
+                            <button type="submit" class="btn btn-sm btn-primary">{% if s.is_active %}停用{% else %}启用{% endif %}</button>
+                        </form>
+                        <form method="POST" action="/linkage-strategies/delete/{{ s.id }}" style="display:inline;" onsubmit="return confirm('确认删除此联动策略？')">
+                            <button type="submit" class="btn btn-danger">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+                {% if not strategies %}
+                <tr><td colspan="8" style="text-align:center;color:var(--text-secondary);">暂无联动策略</td></tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleTriggerFields() {
+    const type = document.getElementById('triggerType').value;
+    document.getElementById('triggerGateGroup').style.display = type === 'gate_event' ? '' : 'none';
+    document.getElementById('triggerEventGroup').style.display = (type === 'gate_event' || type === 'time_based') ? '' : 'none';
+}
+
+function addLinkageItem() {
+    const container = document.getElementById('linkageItems');
+    const row = document.createElement('div');
+    row.className = 'linkage-item-row';
+    row.style.cssText = 'display:grid;grid-template-columns:1fr 120px 120px auto;gap:0.5rem;align-items:end;margin-bottom:0.5rem;';
+    let gateOpts = '{% for g in gates %}<option value="{{ g.id }}">{{ g.gate_name }}</option>{% endfor %}';
+    row.innerHTML = `
+        <div class="form-group"><label>城门</label><select class="li-gate">${gateOpts}</select></div>
+        <div class="form-group"><label>开门时间</label><input type="time" class="li-open" value=""></div>
+        <div class="form-group"><label>关门时间</label><input type="time" class="li-close" value=""></div>
+        <div class="form-group"><label>&nbsp;</label><button type="button" class="btn btn-danger" onclick="this.closest('.linkage-item-row').remove()">移除</button></div>
+    `;
+    container.appendChild(row);
+}
+
+function prepareSubmit() {
+    const items = [];
+    document.querySelectorAll('.linkage-item-row').forEach(row => {
+        const gateId = row.querySelector('.li-gate').value;
+        const openTime = row.querySelector('.li-open').value;
+        const closeTime = row.querySelector('.li-close').value;
+        if (gateId) {
+            items.push({ gate_id: parseInt(gateId), effect_open_time: openTime, effect_close_time: closeTime });
+        }
+    });
+    document.getElementById('itemsJson').value = JSON.stringify(items);
+}
+</script>
+{% endblock %}

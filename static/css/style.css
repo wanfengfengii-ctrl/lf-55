@@ -415,3 +415,36 @@ tr:hover {
 .error-close:hover {
     opacity: 1;
 }
+
+.conflict-indicator.info {
+    background: var(--accent-blue);
+}
+
+.rule-chain-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.rule-chain-item {
+    padding: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius);
+    background: var(--bg-input);
+}
+
+.rule-chain-header {
+    margin-bottom: 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.rule-chain-steps {
+    line-height: 1.8;
+}
+
+.linkage-item-row {
+    margin-bottom: 0.5rem;
+}

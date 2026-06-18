@@ -14,6 +14,17 @@ from services import (
     check_curfew_conflict_with_season,
     get_dates_in_season,
     _time_to_minutes,
+    get_all_temp_controls,
+    create_temp_control,
+    delete_temp_control,
+    toggle_temp_control,
+    get_all_linkage_strategies,
+    create_linkage_strategy,
+    delete_linkage_strategy,
+    toggle_linkage_strategy,
+    preview_conflicts,
+    simulate_batch_publish,
+    get_linkage_weekly_comparison,
 )
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -666,3 +677,143 @@ async def api_schedules_for_date(date_str: str):
 async def api_generate_single(gate_id: int, date_str: str):
     result = generate_schedule_for_gate_date(gate_id, date_str)
     return JSONResponse(content=result)
+
+
+@app.get("/temp-controls", response_class=HTMLResponse)
+async def temp_controls_page(request: Request, error: str = None):
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    conn.close()
+    orders = get_all_temp_controls()
+    return templates.TemplateResponse("temp_controls.html", {
+        "request": request,
+        "gates": gates,
+        "orders": orders,
+        "active_page": "temp_controls",
+        "error_msg": error,
+    })
+
+
+@app.post("/temp-controls/add")
+async def add_temp_control(
+    order_name: str = Form(...),
+    start_date: str = Form(...),
+    end_date: str = Form(...),
+    time_start: str = Form("00:00"),
+    time_end: str = Form("23:59"),
+    action_type: str = Form(...),
+    forced_open_time: str = Form(""),
+    forced_close_time: str = Form(""),
+    priority: int = Form(10),
+    override_reason: str = Form(""),
+    gate_ids: str = Form(...),
+):
+    gid_list = [int(x) for x in gate_ids.split(",") if x.strip().isdigit()]
+    if not gid_list:
+        return redirect_with_error("/temp-controls", "请至少选择一个城门")
+    result = create_temp_control(
+        order_name, start_date, end_date, time_start, time_end,
+        action_type, forced_open_time, forced_close_time,
+        priority, override_reason, gid_list,
+    )
+    if not result.get("success"):
+        return redirect_with_error("/temp-controls", "创建管制令失败")
+    return RedirectResponse(url="/temp-controls", status_code=303)
+
+
+@app.post("/temp-controls/delete/{order_id}")
+async def delete_temp_control_route(order_id: int):
+    delete_temp_control(order_id)
+    return RedirectResponse(url="/temp-controls", status_code=303)
+
+
+@app.post("/temp-controls/toggle/{order_id}")
+async def toggle_temp_control_route(order_id: int):
+    toggle_temp_control(order_id)
+    return RedirectResponse(url="/temp-controls", status_code=303)
+
+
+@app.get("/linkage-strategies", response_class=HTMLResponse)
+async def linkage_strategies_page(request: Request, error: str = None):
+    conn = get_db()
+    gates = conn.execute("SELECT * FROM gates ORDER BY id").fetchall()
+    conn.close()
+    strategies = get_all_linkage_strategies()
+    return templates.TemplateResponse("linkage_strategies.html", {
+        "request": request,
+        "gates": gates,
+        "strategies": strategies,
+        "active_page": "linkage_strategies",
+        "error_msg": error,
+    })
+
+
+@app.post("/linkage-strategies/add")
+async def add_linkage_strategy(
+    strategy_name: str = Form(...),
+    trigger_type: str = Form(...),
+    trigger_gate_id: str = Form(""),
+    trigger_event: str = Form(""),
+    linked_open_time: str = Form(""),
+    linked_close_time: str = Form(""),
+    priority: int = Form(5),
+    description: str = Form(""),
+    items_json: str = Form(...),
+):
+    import json
+    try:
+        items = json.loads(items_json)
+    except Exception:
+        return redirect_with_error("/linkage-strategies", "联动项数据格式错误")
+    if not items:
+        return redirect_with_error("/linkage-strategies", "请至少添加一个联动城门")
+    result = create_linkage_strategy(
+        strategy_name, trigger_type, trigger_gate_id,
+        trigger_event, linked_open_time, linked_close_time,
+        priority, description, items,
+    )
+    if not result.get("success"):
+        return redirect_with_error("/linkage-strategies", "创建联动策略失败")
+    return RedirectResponse(url="/linkage-strategies", status_code=303)
+
+
+@app.post("/linkage-strategies/delete/{strategy_id}")
+async def delete_linkage_strategy_route(strategy_id: int):
+    delete_linkage_strategy(strategy_id)
+    return RedirectResponse(url="/linkage-strategies", status_code=303)
+
+
+@app.post("/linkage-strategies/toggle/{strategy_id}")
+async def toggle_linkage_strategy_route(strategy_id: int):
+    toggle_linkage_strategy(strategy_id)
+    return RedirectResponse(url="/linkage-strategies", status_code=303)
+
+
+@app.get("/api/schedules/conflict-preview")
+async def api_conflict_preview(start_date: str, end_date: str):
+    result = preview_conflicts(start_date, end_date)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/schedules/batch-simulate")
+async def api_batch_simulate(start_date: str, end_date: str):
+    result = simulate_batch_publish(start_date, end_date)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/linkage/weekly-comparison")
+async def api_linkage_weekly_comparison(start_date: str, strategy_id: int):
+    result = get_linkage_weekly_comparison(start_date, strategy_id)
+    if "error" in result:
+        return JSONResponse(content=result, status_code=404)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/linkage/strategies-list")
+async def api_linkage_strategies_list():
+    strategies = get_all_linkage_strategies()
+    return JSONResponse(content=[{
+        "id": s["id"],
+        "strategy_name": s["strategy_name"],
+        "is_active": s["is_active"],
+    } for s in strategies])
